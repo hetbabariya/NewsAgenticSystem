@@ -1,5 +1,6 @@
 import asyncio
 import os
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from logging.config import fileConfig
 
 from alembic import context
@@ -25,10 +26,27 @@ def _get_database_url() -> str:
     if not url:
         raise RuntimeError("DATABASE_URL is not set. Set it before running Alembic.")
 
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
     return url
+
+
+def _normalize_connect_args(url: str) -> tuple[str, dict]:
+    connect_args: dict = {}
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    sslmode = query.pop("sslmode", None)
+    if sslmode and sslmode.lower() in {"require", "verify-ca", "verify-full"}:
+        connect_args["ssl"] = True
+
+    # libpq-style parameters that asyncpg does not accept
+    query.pop("channel_binding", None)
+
+    normalized_url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    return normalized_url, connect_args
 
 
 def run_migrations_offline() -> None:
@@ -54,12 +72,14 @@ def do_run_migrations(connection) -> None:
 
 async def run_migrations_online() -> None:
     url = _get_database_url()
+    url, connect_args = _normalize_connect_args(url)
     config.set_main_option("sqlalchemy.url", url)
 
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=connect_args,
     )
 
     async with connectable.connect() as connection:
