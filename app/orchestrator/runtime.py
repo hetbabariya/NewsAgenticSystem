@@ -278,14 +278,14 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
         text_l = text.lower()
         await log_conversation("user", text)
 
-        # Fast-path: greetings/smalltalk should not trigger tool calls.
-        greeting_tokens = {"hi", "hello", "hey", "hii", "hiii", "yo", "gm", "good morning", "good evening", "good night"}
-        if text_l.strip() in greeting_tokens or any(text_l.strip().startswith(t + " ") for t in greeting_tokens):
-            final_text = "Hi! Tell me what you want: (1) update your interests, or (2) ask for news, or (3) run today’s digest."
-            await log_conversation("assistant", final_text)
-            result = {"messages": [HumanMessage(content=final_text)]}
-            agent_logger.log_final_answer("COORDINATOR", final_text)
-            return result
+        # # Fast-path: greetings/smalltalk should not trigger tool calls.
+        # greeting_tokens = {"hi", "hello", "hey", "hii", "hiii", "yo", "gm", "good morning", "good evening", "good night"}
+        # if text_l.strip() in greeting_tokens or any(text_l.strip().startswith(t + " ") for t in greeting_tokens):
+        #     final_text = "Hi! Tell me what you want: (1) update your interests, or (2) ask for news, or (3) run today’s digest."
+        #     await log_conversation("assistant", final_text)
+        #     result = {"messages": [HumanMessage(content=final_text)]}
+        #     agent_logger.log_final_answer("COORDINATOR", final_text)
+        #     return result
         context = {
             "trigger": trigger,
             "payload": payload,

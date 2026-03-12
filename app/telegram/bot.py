@@ -17,6 +17,16 @@ def _get_bot() -> Bot:
     return Bot(token=settings.telegram_bot_token)
 
 
+import re
+
+def _escape_markdown(text: str) -> str:
+    """Helper to escape Markdown special characters for Telegram."""
+    # List of characters to escape for Markdown (V1 in Telegram is simpler than V2)
+    # But even V1 can fail on unclosed _ or *
+    escape_chars = r"_*`["
+    return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", text)
+
+
 async def send_message(chat_id: str, text: str, parse_mode: str = "Markdown") -> bool:
     """Send a text message. Returns True on success."""
     try:
@@ -24,9 +34,16 @@ async def send_message(chat_id: str, text: str, parse_mode: str = "Markdown") ->
         try:
             await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
         except Exception as e:
-            log.error("send_message failed: %s", e)
-            # Don't raise, just log, so the process can continue during testing
-            return False
+            log.error("send_message failed: %s. Retrying with escaped text.", e)
+            # Fallback: escape and retry without Markdown
+            try:
+                # If Markdown fails, it's usually unclosed entities.
+                # We try sending as plain text (parse_mode=None) as the safest fallback.
+                await bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
+                return True
+            except Exception as e2:
+                log.error("send_message fallback failed: %s", e2)
+                return False
         return True
     except Exception as exc:
         log.error("send_message failed: %s", exc)
