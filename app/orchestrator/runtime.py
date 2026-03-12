@@ -230,6 +230,55 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
             r3 = await run_summarizer.ainvoke({})
             agent_logger.log_final_answer("SUMMARIZER", str(r3))
 
+            # Immediate urgent alerts (Telegram admin) — deterministic, no LLM.
+            # We only alert on summaries that have not been sent_immediate yet to prevent repeat pings.
+            if settings.telegram_admin_chat_id:
+                try:
+                    from app.db.neon import fetch_all
+
+                    urgent_rows = await fetch_all(
+                        """
+                        SELECT s.id AS summary_id,
+                               s.source_id,
+                               a.title,
+                               a.url,
+                               a.relevance_score
+                        FROM summaries s
+                        JOIN raw_articles a ON a.id = s.source_id
+                        WHERE a.is_urgent = TRUE
+                          AND s.sent_immediate = FALSE
+                          AND s.created_at >= NOW() - INTERVAL '24 hours'
+                        ORDER BY a.relevance_score DESC NULLS LAST
+                        LIMIT 5
+                        """
+                    )
+
+                    if urgent_rows:
+                        lines = ["URGENT: Top updates"]
+                        summary_ids: list[str] = []
+                        for row in urgent_rows:
+                            title = str(row.get("title") or "(untitled)").strip()
+                            url = str(row.get("url") or "").strip()
+                            if url:
+                                lines.append(f"- {title}\n  {url}")
+                            else:
+                                lines.append(f"- {title}")
+                            if row.get("summary_id") is not None:
+                                summary_ids.append(str(row.get("summary_id")))
+
+                        await send_message(settings.telegram_admin_chat_id, "\n".join(lines), parse_mode=None)
+
+                        if summary_ids:
+                            try:
+                                await execute(
+                                    "UPDATE summaries SET sent_immediate = TRUE WHERE id = ANY($1::uuid[])",
+                                    [s for s in summary_ids],
+                                )
+                            except Exception as mark_exc:
+                                log.warning("Failed to mark urgent summaries sent_immediate: %s", mark_exc)
+                except Exception as exc:
+                    log.warning("Urgent Telegram alert failed: %s", exc)
+
             result = {"collector": r1, "filter": r2, "summarizer": r3}
 
         else:
@@ -381,17 +430,72 @@ async def handle_telegram_message(text: str, chat_id: str) -> None:
         await send_message(chat_id, "Sorry — I hit an internal error handling that message.")
         return
 
+    def _extract_user_text(obj: object) -> str | None:
+        """Extract user-facing text from various agent outputs.
+
+        Supports:
+        - dict payloads with keys like 'answer', 'summary', 'message'
+        - JSON strings that contain those keys
+        - LangChain message objects (with .content)
+        """
+
+        if obj is None:
+            return None
+
+        # Direct dict payload
+        if isinstance(obj, dict):
+            if isinstance(obj.get("answer"), str) and obj.get("answer"):
+                return obj["answer"]
+            if isinstance(obj.get("summary"), str) and obj.get("summary"):
+                return obj["summary"]
+            if isinstance(obj.get("message"), str) and obj.get("message"):
+                return obj["message"]
+
+        # JSON string payload
+        if isinstance(obj, str):
+            s = obj.strip()
+            if s.startswith("{") and s.endswith("}"):
+                try:
+                    data = json.loads(s)
+                    if isinstance(data, dict):
+                        return _extract_user_text(data)
+                except Exception:
+                    # Regex fallback for cases where json parsing fails (e.g., malformed JSON)
+                    import re
+
+                    m = re.search(r"\"answer\"\s*:\s*\"(.*?)\"", s, flags=re.DOTALL)
+                    if m:
+                        return m.group(1)
+                    m = re.search(r"\"summary\"\s*:\s*\"(.*?)\"", s, flags=re.DOTALL)
+                    if m:
+                        return m.group(1)
+            return s or None
+
+        # LangChain message-like object
+        content = getattr(obj, "content", None)
+        if content is not None:
+            return _extract_user_text(content)
+
+        return None
+
     final_text = None
     try:
-        if isinstance(result, dict) and "preferences" in result:
-            prefs = result.get("preferences") or {}
-            summary = prefs.get("summary") or prefs.get("message") or "Updated your preferences."
-            final_text = str(summary)
-        elif isinstance(result, dict) and "messages" in result:
-            messages = result.get("messages")
-            if messages:
-                last = messages[-1]
-                final_text = getattr(last, "content", None)
+        if isinstance(result, dict):
+            # 1) Deterministic overrides
+            if "display_text" in result:
+                final_text = _extract_user_text(result.get("display_text"))
+
+            # 2) Memory tool output (update_user_preferences returns a dict)
+            if not final_text and "preferences" in result:
+                final_text = _extract_user_text(result.get("preferences"))
+                if not final_text:
+                    final_text = "Updated your preferences."
+
+            # 3) Standard LangGraph agent output
+            if not final_text and "messages" in result:
+                messages = result.get("messages")
+                if messages:
+                    final_text = _extract_user_text(messages[-1])
     except Exception:
         final_text = None
 

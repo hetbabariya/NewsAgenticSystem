@@ -8,7 +8,7 @@ Jobs:
   1. ingest_job       — every 30 min
   2. daily_news_job   — every day at 6:55 AM IST (GitHub fetch before newspaper)
   3. newspaper_job    — every day at 7:00 AM IST
-  4. health_ping_job  — every 14 min (keeps Render free tier awake)
+  4. health_ping_job  — every 10 min (keeps Render free tier awake)
   5. cleanup_job      — every day at 2:00 AM IST (prune old raw articles)
 """
 
@@ -149,7 +149,7 @@ async def cleanup_job() -> None:
 
 async def health_ping_job() -> None:
     """
-    Runs every 14 min.
+    Runs every 10 min.
     Pings own /health endpoint to prevent Render free tier from sleeping.
     Only active when ENV = 'production'.
     Skip entirely in development to avoid noise.
@@ -248,10 +248,10 @@ def create_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # ── 4. Health ping — every 14 min ──────────────────────────────────────
+    # ── 4. Health ping — every 10 min ──────────────────────────────────────
     scheduler.add_job(
         health_ping_job,
-        trigger=IntervalTrigger(minutes=14, timezone=IST),
+        trigger=IntervalTrigger(minutes=10, timezone=IST),
         id="health_ping_job",
         name="Render Keep-Alive Ping",
         misfire_grace_time=2 * 60,

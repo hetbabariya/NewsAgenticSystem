@@ -81,6 +81,7 @@ app = FastAPI(lifespan=lifespan, title="NewsAgent", version="1.0.0")
 
 
 @app.get("/health")
+@app.head("/health")
 async def health() -> dict:
     jobs: list[dict] | None = None
     try:
