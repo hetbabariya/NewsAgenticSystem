@@ -17,6 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-cffi \
     python3-brotli \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    shared-mime-info \
+    fontconfig \
+    fonts-dejavu-core \
     libpango-1.0-0 \
     libharfbuzz0b \
     libpangoft2-1.0-0 \
@@ -41,6 +46,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends \
     nodejs \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    shared-mime-info \
+    fontconfig \
+    fonts-dejavu-core \
     libpango-1.0-0 \
     libharfbuzz0b \
     libpangoft2-1.0-0 \

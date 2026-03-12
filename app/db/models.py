@@ -1,7 +1,7 @@
 import uuid
 import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, SmallInteger, String, Text, func, text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -19,7 +19,8 @@ class RawArticle(Base):
     source: Mapped[str | None] = mapped_column(String(100))
     fetched_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     status: Mapped[str] = mapped_column(String(20), server_default=text("'raw'"), nullable=False)
-    relevance_score: Mapped[int | None] = mapped_column(SmallInteger)
+    relevance_score: Mapped[float | None] = mapped_column(Float)
+    is_urgent: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
 
     summaries: Mapped[list["Summary"]] = relationship(back_populates="article")
 
@@ -28,10 +29,11 @@ class Summary(Base):
     __tablename__ = "summaries"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    article_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("raw_articles.id"))
+    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("raw_articles.id"), unique=True)
     summary_text: Mapped[str] = mapped_column(Text, nullable=False)
-    relevance_score: Mapped[int | None] = mapped_column(SmallInteger)
+    relevance_score: Mapped[float | None] = mapped_column(Float)
     pinecone_id: Mapped[str | None] = mapped_column(String(100))
+    metadata_: Mapped[dict | None] = mapped_column("metadata", JSONB)
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     sent_immediate: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
     sent_newspaper: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
@@ -80,7 +82,7 @@ class KeyUsage(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     provider: Mapped[str | None] = mapped_column(String(20))
-    key_index: Mapped[int | None] = mapped_column(SmallInteger)
+    key_index: Mapped[int | None] = mapped_column(Integer)
     calls_today: Mapped[int] = mapped_column(Integer, server_default=text("0"), nullable=False)
     last_429_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     is_blocked: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)

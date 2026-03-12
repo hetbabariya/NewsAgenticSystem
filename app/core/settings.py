@@ -42,10 +42,41 @@ class Settings(BaseSettings):
     reddit_client_secret: str | None = Field(default=None, validation_alias="REDDIT_CLIENT_SECRET")
     reddit_user_agent: str = Field(default="newsagent:v1.0", validation_alias="REDDIT_USER_AGENT")
 
-    score_urgent: int = Field(default=8, validation_alias="SCORE_URGENT")
-    score_minimum: int = Field(default=4, validation_alias="SCORE_MINIMUM")
+    supabase_url: str | None = Field(default=None, validation_alias="SUPABASE_URL")
+    supabase_service_role_key: str | None = Field(default=None, validation_alias="SUPABASE_SERVICE_ROLE_KEY")
+    supabase_storage_bucket: str = Field(default="newspapers", validation_alias="SUPABASE_STORAGE_BUCKET")
+    supabase_storage_public: bool = Field(default=False, validation_alias="SUPABASE_STORAGE_PUBLIC")
+
+    score_urgent: float = Field(default=0.7, validation_alias="SCORE_URGENT")
+    score_minimum: float = Field(default=0.4, validation_alias="SCORE_MINIMUM")
 
     key_rotation_cooldown_seconds: int = Field(default=60, validation_alias="KEY_ROTATION_COOLDOWN_SECONDS")
+
+    # --- External tool/source limits (robustness) ---
+    max_query_chars: int = Field(default=240, validation_alias="MAX_QUERY_CHARS")
+    tavily_max_results: int = Field(default=5, validation_alias="TAVILY_MAX_RESULTS")
+    github_max_results: int = Field(default=5, validation_alias="GITHUB_MAX_RESULTS")
+    twitter_max_results: int = Field(default=10, validation_alias="TWITTER_MAX_RESULTS")
+
+    mcp_ingest_enabled: bool = Field(default=True, validation_alias="MCP_INGEST_ENABLED")
+    mcp_max_calls_per_run: int = Field(default=6, validation_alias="MCP_MAX_CALLS_PER_RUN")
+
+    reddit_max_posts: int = Field(default=5, validation_alias="REDDIT_MAX_POSTS")
+    reddit_timeout_seconds: float = Field(default=20.0, validation_alias="REDDIT_TIMEOUT_SECONDS")
+    reddit_max_retries: int = Field(default=2, validation_alias="REDDIT_MAX_RETRIES")
+    reddit_retry_base_delay_seconds: float = Field(default=1.5, validation_alias="REDDIT_RETRY_BASE_DELAY_SECONDS")
+
+    # Collector safety caps (prevents loops / huge payloads)
+    collector_max_articles_total: int = Field(default=50, validation_alias="COLLECTOR_MAX_ARTICLES_TOTAL")
+    collector_max_mcp_articles: int = Field(default=30, validation_alias="COLLECTOR_MAX_MCP_ARTICLES")
+    collector_max_topics: int = Field(default=6, validation_alias="COLLECTOR_MAX_TOPICS")
+    collector_max_sources: int = Field(default=6, validation_alias="COLLECTOR_MAX_SOURCES")
+
+    # Stored field sizes (truncate to avoid DB bloat)
+    max_article_url_chars: int = Field(default=2048, validation_alias="MAX_ARTICLE_URL_CHARS")
+    max_article_title_chars: int = Field(default=500, validation_alias="MAX_ARTICLE_TITLE_CHARS")
+    max_article_content_chars: int = Field(default=6000, validation_alias="MAX_ARTICLE_CONTENT_CHARS")
+    max_article_source_chars: int = Field(default=120, validation_alias="MAX_ARTICLE_SOURCE_CHARS")
 
     # Model Configuration
     model_coordinator: str = Field(default="meta-llama/llama-4-scout-17b-16e-instruct", validation_alias="MODEL_COORDINATOR")
@@ -103,6 +134,9 @@ class Settings(BaseSettings):
 
         if not self.reddit_client_id:
             log.warning("Reddit keys missing — Reddit source will be skipped.")
+
+        if self.supabase_url and not self.supabase_service_role_key:
+            log.warning("SUPABASE_URL set but SUPABASE_SERVICE_ROLE_KEY missing — PDF upload will be disabled.")
 
         log.info(
             "Settings OK | env=%s groq_keys=%d or_keys=%d tavily_keys=%d",

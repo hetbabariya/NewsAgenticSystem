@@ -11,7 +11,11 @@ def build_memory_agent(*, model, tools: list):
             "Rules:\n"
             "- Call update_user_preferences for preference changes.\n"
             "- Call store_user_fact for durable facts.\n"
-            f"- Your final response MUST be a valid JSON object matching this structure: {json.dumps(MemoryResponse.model_json_schema())}\n"
+            "- Your final response MUST be a valid JSON OBJECT (an instance), matching this EXACT structure:\n"
+            '{"updated": <true|false>, "summary": "<string>"}\n'
+            "Example valid response:\n"
+            '{"updated": true, "summary": "Stored user fact: user_interests=quantum computing"}\n'
+            "- Do NOT output JSON schema (do NOT include keys like 'properties', '$defs', 'title').\n"
             "- Do not wrap the JSON in markdown blocks or include any other text.\n"
         )
     )

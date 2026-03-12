@@ -5,6 +5,7 @@ All agents call these helpers. Never write raw asyncpg elsewhere.
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 from typing import Any
@@ -94,7 +95,91 @@ async def get_preferences() -> dict:
     if not row:
         return {}
     prefs = row["prefs_json"]
-    return dict(prefs) if prefs else {}
+    if not prefs:
+        return {}
+    if isinstance(prefs, dict):
+        return prefs
+    if isinstance(prefs, str):
+        try:
+            parsed = json.loads(prefs)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    # asyncpg may return JSON/JSONB as a Mapping-like object
+    try:
+        return dict(prefs)
+    except Exception:
+        return {}
+
+
+async def ensure_key_usage_row(provider: str, key_index: int) -> None:
+    row = await fetch_one(
+        "SELECT id FROM key_usage WHERE provider = $1 AND key_index = $2 LIMIT 1",
+        provider,
+        int(key_index),
+    )
+    if row:
+        return
+
+    await execute(
+        """
+        INSERT INTO key_usage (provider, key_index, calls_today, is_blocked, updated_at)
+        VALUES ($1, $2, 0, FALSE, NOW())
+        """,
+        provider,
+        int(key_index),
+    )
+
+
+async def bump_key_usage(provider: str, key_index: int) -> None:
+    """Increment calls_today for a provider/key_index. Resets the counter when the date changes."""
+    await ensure_key_usage_row(provider, key_index)
+
+    row = await fetch_one(
+        "SELECT calls_today, updated_at FROM key_usage WHERE provider = $1 AND key_index = $2 LIMIT 1",
+        provider,
+        int(key_index),
+    )
+    if not row:
+        return
+
+    calls_today = int(row["calls_today"] or 0)
+    updated_at = row["updated_at"]
+    if updated_at is not None:
+        try:
+            if updated_at.date() != datetime.date.today():
+                calls_today = 0
+        except Exception:
+            pass
+
+    await execute(
+        """
+        UPDATE key_usage
+        SET calls_today = $1,
+            is_blocked = FALSE,
+            updated_at = NOW()
+        WHERE provider = $2 AND key_index = $3
+        """,
+        calls_today + 1,
+        provider,
+        int(key_index),
+    )
+
+
+async def report_key_429(provider: str, key_index: int) -> None:
+    """Mark a provider/key_index as blocked due to 429."""
+    await ensure_key_usage_row(provider, key_index)
+    await execute(
+        """
+        UPDATE key_usage
+        SET last_429_at = NOW(),
+            is_blocked = TRUE,
+            updated_at = NOW()
+        WHERE provider = $1 AND key_index = $2
+        """,
+        provider,
+        int(key_index),
+    )
 
 
 async def write_episodic(event_type: str, description: str, metadata: dict | None = None) -> None:

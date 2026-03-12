@@ -22,6 +22,7 @@ from app.orchestrator.agents.support import build_support_agent
 from app.orchestrator.dispatcher import AgentRegistry, build_dispatch_tools
 from app.orchestrator.mcp import mcp_config
 from app.orchestrator.registry import AgentSpec
+from app.db.neon import bump_key_usage, report_key_429
 from app.orchestrator.tools import (
     fetch_summaries_for_newspaper,
     generate_newspaper_pdf,
@@ -64,12 +65,12 @@ def _build_registry() -> AgentRegistry:
         AgentSpec(
             name="collector",
             description="Collects fresh news articles from configured sources and stores them.",
-            build=lambda shared: build_collector_agent(model=_groq_model(settings.model_collector), tools=shared),
+            build=lambda shared: build_collector_agent(model=_openrouter_model(settings.model_collector), tools=shared),
         ),
         AgentSpec(
             name="filter",
             description="Scores and filters collected articles based on user preferences.",
-            build=lambda shared: build_filter_agent(model=_groq_model(settings.model_filter), tools=shared),
+            build=lambda shared: build_filter_agent(model=_openrouter_model(settings.model_filter), tools=shared),
         ),
         AgentSpec(
             name="summarizer",
@@ -79,7 +80,7 @@ def _build_registry() -> AgentRegistry:
         AgentSpec(
             name="memory",
             description="Updates user preferences and stores user facts.",
-            build=lambda shared: build_memory_agent(model=_groq_model(settings.model_memory), tools=shared),
+            build=lambda shared: build_memory_agent(model=_openrouter_model(settings.model_memory), tools=shared),
         ),
         AgentSpec(
             name="support",
@@ -137,19 +138,20 @@ class RotatingGroqChatModel(Runnable):
             max_attempts=self._max_attempts,
         )
 
-    def _next_key(self) -> str:
+    def _next_key(self) -> tuple[str, int]:
         global _groq_key_idx
         keys = settings.groq_keys
         if not keys:
             raise RuntimeError("Groq keys not configured (GROQ_KEY_0...).")
-        key = keys[_groq_key_idx % len(keys)]
+        idx = _groq_key_idx % len(keys)
+        key = keys[idx]
         _groq_key_idx += 1
-        return key
+        return key, idx
 
-    def _new_client(self) -> ChatGroq:
+    def _new_client(self, *, key: str) -> ChatGroq:
         client = ChatGroq(
             model=self._model,
-            api_key=self._next_key(),
+            api_key=key,
             temperature=self._temperature,
         )
 
@@ -158,15 +160,24 @@ class RotatingGroqChatModel(Runnable):
 
         return client
 
-    def invoke(self, input: Any, config: RunnableConfig | None = None, **kwargs: Any) -> Any:
+    async def ainvoke(self, input: Any, config: RunnableConfig | None = None, **kwargs: Any) -> Any:
         last_exc: Exception | None = None
         attempts = max(self._max_attempts, len(settings.groq_keys) or 1)
         for _ in range(attempts):
             try:
-                return self._new_client().invoke(input, config=config, **kwargs)
+                key, idx = self._next_key()
+                await bump_key_usage("groq", idx)
+                response = await self._new_client(key=key).ainvoke(input, config=config, **kwargs)
+                from app.core.logger import agent_logger
+                agent_logger.log_llm_io(self._model, input, response)
+                return response
             except Exception as exc:
                 last_exc = exc
                 if _is_rate_limit_429(exc):
+                    try:
+                        await report_key_429("groq", idx)
+                    except Exception:
+                        pass
                     continue
                 raise
         raise RuntimeError(f"All Groq keys rate-limited/exhausted. Last error: {last_exc}") from last_exc
@@ -194,19 +205,20 @@ class RotatingOpenRouterChatModel(Runnable):
             max_attempts=self._max_attempts,
         )
 
-    def _next_key(self) -> str:
+    def _next_key(self) -> tuple[str, int]:
         global _openrouter_key_idx
         keys = settings.openrouter_keys
         if not keys:
             raise RuntimeError("OpenRouter keys not configured (OR_KEY_0... or OPENROUTER_API_KEYS).")
-        key = keys[_openrouter_key_idx % len(keys)]
+        idx = _openrouter_key_idx % len(keys)
+        key = keys[idx]
         _openrouter_key_idx += 1
-        return key
+        return key, idx
 
-    def _new_client(self) -> ChatOpenAI:
+    def _new_client(self, *, key: str) -> ChatOpenAI:
         client = ChatOpenAI(
             model=self._model,
-            api_key=self._next_key(),
+            api_key=key,
             base_url="https://openrouter.ai/api/v1",
             temperature=self._temperature,
         )
@@ -221,10 +233,24 @@ class RotatingOpenRouterChatModel(Runnable):
         attempts = max(self._max_attempts, len(settings.openrouter_keys) or 1)
         for _ in range(attempts):
             try:
-                return self._new_client().invoke(input, config=config, **kwargs)
+                key, idx = self._next_key()
+                try:
+                    import asyncio
+                    asyncio.get_event_loop().create_task(bump_key_usage("openrouter", idx))
+                except Exception:
+                    pass
+                response = self._new_client(key=key).invoke(input, config=config, **kwargs)
+                from app.core.logger import agent_logger
+                agent_logger.log_llm_io(self._model, input, response)
+                return response
             except Exception as exc:
                 last_exc = exc
                 if _is_rate_limit_429(exc):
+                    try:
+                        import asyncio
+                        asyncio.get_event_loop().create_task(report_key_429("openrouter", idx))
+                    except Exception:
+                        pass
                     continue
                 raise
         raise RuntimeError(
@@ -236,10 +262,19 @@ class RotatingOpenRouterChatModel(Runnable):
         attempts = max(self._max_attempts, len(settings.openrouter_keys) or 1)
         for _ in range(attempts):
             try:
-                return await self._new_client().ainvoke(input, config=config, **kwargs)
+                key, idx = self._next_key()
+                await bump_key_usage("openrouter", idx)
+                response = await self._new_client(key=key).ainvoke(input, config=config, **kwargs)
+                from app.core.logger import agent_logger
+                agent_logger.log_llm_io(self._model, input, response)
+                return response
             except Exception as exc:
                 last_exc = exc
                 if _is_rate_limit_429(exc):
+                    try:
+                        await report_key_429("openrouter", idx)
+                    except Exception:
+                        pass
                     continue
                 raise
         raise RuntimeError(
@@ -282,7 +317,7 @@ def build_coordinator(*, mcp_client: MultiServerMCPClient | None, mcp_tools: lis
         )
     )
 
-    return create_react_agent(model=_groq_model(settings.model_coordinator), tools=dispatch_tools, prompt=prompt)
+    return create_react_agent(model=_openrouter_model(settings.model_coordinator), tools=dispatch_tools, prompt=prompt)
 
 
 def build_shared_tools(*, mcp_tools: list) -> list:
@@ -301,7 +336,20 @@ async def init_mcp() -> tuple[MultiServerMCPClient | None, list]:
 async def close_mcp(client: MultiServerMCPClient | None) -> None:
     if client is None:
         return
-    # MultiServerMCPClient doesn't support __aexit__ directly in 0.1.0+
-    # It will be closed when the process exits or we can just let it be
-    # as the implementation changed.
-    pass
+    # Best-effort cleanup. The adapter/client API has changed across versions,
+    # so we defensively call whichever close method exists.
+    try:
+        aclose = getattr(client, "aclose", None)
+        if callable(aclose):
+            await aclose()
+            return
+
+        close = getattr(client, "close", None)
+        if callable(close):
+            res = close()
+            if hasattr(res, "__await__"):
+                await res
+            return
+    except Exception:
+        # Avoid raising on shutdown; this is purely a cleanup path.
+        return
