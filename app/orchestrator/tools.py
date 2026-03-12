@@ -11,6 +11,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from weasyprint import HTML
 
+from app.core.logger import agent_logger
 from app.db.neon import execute, fetch_all, fetch_val, get_preferences
 from app.core.settings import settings
 from langchain_groq import ChatGroq
