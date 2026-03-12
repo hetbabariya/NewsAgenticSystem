@@ -23,4 +23,5 @@ dependencies = [
     "uvicorn>=0.41.0",
     "weasyprint==62.3",
     "pydyf==0.10.0",
+    "rich>=13.7.1",
 ]
