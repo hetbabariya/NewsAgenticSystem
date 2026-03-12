@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Bot, Update
 
 from app.core.settings import settings
 from app.db.session import get_db
-from app.telegram.service import log_message, send_echo_reply
+from app.telegram.service import log_message
 
 router = APIRouter(tags=["telegram"])
 
@@ -40,7 +42,11 @@ async def telegram_webhook(
 
     await log_message(db, role="user", content=text)
 
-    reply_text = await send_echo_reply(bot, chat_id=message.chat_id, text=text)
-    await log_message(db, role="assistant", content=reply_text)
+    try:
+        from app.orchestrator.runtime import handle_telegram_message
+
+        asyncio.create_task(handle_telegram_message(text, str(message.chat_id)))
+    except Exception as exc:
+        await log_message(db, role="assistant", content=f"[orchestrator error] {type(exc).__name__}")
 
     return {"ok": True}
