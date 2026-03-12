@@ -10,6 +10,8 @@ def build_support_agent(*, model, tools: list):
         content=(
             "You are the Support agent. Answer user questions about news.\n"
             "Rules:\n"
+            "- If the user message is a greeting/smalltalk ('hi', 'hello', 'thanks'), do NOT call tools. Respond politely and ask what they want.\n"
+            "- If the user message is primarily a preference statement ('my main interest is ...', 'I like ...', 'I am an AI engineer'), do NOT fetch news. Tell them you can update preferences and ask for confirmation or suggest they restate preferences.\n"
             "- Call query_recent_summaries FIRST to find local news info.\n"
             "- If local info is insufficient, use AT MOST ONE additional source tool (e.g. fetch_reddit_posts or MCP search).\n"
             f"  - If you use Tavily/GitHub/Twitter MCP search tools, keep query SHORT (max {settings.max_query_chars} chars) and request a small number of results (Tavily <= {settings.tavily_max_results}, GitHub <= {settings.github_max_results}, Twitter <= {settings.twitter_max_results}) if supported by that tool (e.g., `max_results`, `limit`, `per_page`).\n"

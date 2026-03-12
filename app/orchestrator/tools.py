@@ -357,7 +357,18 @@ async def run_news_collector(
     sources = [str(s).strip().lower() for s in (sources or []) if str(s).strip()]
     sources = sources[: max(1, settings.collector_max_sources)]
 
-    search_topics = topics or ["MachineLearning", "Programming"]
+    if topics is None:
+        try:
+            prefs = await get_preferences()
+            pref_topics = prefs.get("topics") if isinstance(prefs, dict) else None
+            if isinstance(pref_topics, list) and pref_topics:
+                search_topics = pref_topics
+            else:
+                search_topics = ["MachineLearning", "Programming"]
+        except Exception:
+            search_topics = ["MachineLearning", "Programming"]
+    else:
+        search_topics = topics
     search_topics = [str(t).strip() for t in (search_topics or []) if str(t).strip()]
     search_topics = search_topics[: max(1, settings.collector_max_topics)]
 

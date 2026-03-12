@@ -277,6 +277,15 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
         text = str(payload.get("text") or "")
         text_l = text.lower()
         await log_conversation("user", text)
+
+        # Fast-path: greetings/smalltalk should not trigger tool calls.
+        greeting_tokens = {"hi", "hello", "hey", "hii", "hiii", "yo", "gm", "good morning", "good evening", "good night"}
+        if text_l.strip() in greeting_tokens or any(text_l.strip().startswith(t + " ") for t in greeting_tokens):
+            final_text = "Hi! Tell me what you want: (1) update your interests, or (2) ask for news, or (3) run today’s digest."
+            await log_conversation("assistant", final_text)
+            result = {"messages": [HumanMessage(content=final_text)]}
+            agent_logger.log_final_answer("COORDINATOR", final_text)
+            return result
         context = {
             "trigger": trigger,
             "payload": payload,
@@ -291,6 +300,14 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
                 "i am interested",
                 "i like",
                 "i prefer",
+                "my interest",
+                "main interest",
+                "mostly in",
+                "consider my",
+                "i am an",
+                "i'm an",
+                "ai engineer",
+                "my role",
                 "my preference",
                 "i want to avoid",
                 "remember that",
@@ -355,45 +372,39 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
 
 async def handle_telegram_message(text: str, chat_id: str) -> None:
     trace = str(uuid.uuid4())[:8]
-    graph = get_graph()
-
     log.info("[%s] Telegram: %s", trace, text[:80])
-    await log_conversation("user", text)
 
-    history = await get_recent_conversation(10)
-    history_str = "\n".join(f"{m['role']}: {m['content']}" for m in history[-6:])
+    try:
+        result = await run_graph("telegram", {"text": text, "chat_id": chat_id})
+    except Exception as exc:
+        log.exception("[%s] Telegram handling failed: %s", trace, exc)
+        await send_message(chat_id, "Sorry — I hit an internal error handling that message.")
+        return
 
-    context = {"trigger": "telegram", "chat_id": chat_id, "trace_id": trace, "history": history_str}
-
-    result = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content=text)],
-            "context": context,
-        }
-    )
-
-    messages = result.get("messages")
     final_text = None
-    if messages:
-        last = messages[-1]
-        final_text = getattr(last, "content", None)
+    try:
+        if isinstance(result, dict) and "preferences" in result:
+            prefs = result.get("preferences") or {}
+            summary = prefs.get("summary") or prefs.get("message") or "Updated your preferences."
+            final_text = str(summary)
+        elif isinstance(result, dict) and "messages" in result:
+            messages = result.get("messages")
+            if messages:
+                last = messages[-1]
+                final_text = getattr(last, "content", None)
+    except Exception:
+        final_text = None
 
     if not final_text:
         final_text = "OK"
 
-    # Escape markdown special characters for Telegram's MarkdownV2 if needed,
-    # or just use HTML/Plain text if preferred for stability.
-    # For now, let's just log and send.
     try:
-        await send_message(chat_id, final_text)
+        await send_message(chat_id, str(final_text))
     except Exception as e:
         log.error("Failed to send telegram message: %s", e)
-        # Fallback to plain text without any formatting if it failed
         import re
-        plain_text = re.sub(r'[*_`\[\]()]', '', final_text)
+        plain_text = re.sub(r'[*_`\[\]()]', '', str(final_text))
         await send_message(chat_id, f"Error sending formatted message, falling back to plain:\n\n{plain_text}")
-
-    await log_conversation("assistant", final_text)
 
     await write_episodic(
         "telegram_handled",

@@ -11,6 +11,8 @@ def build_memory_agent(*, model, tools: list):
             "Rules:\n"
             "- Call update_user_preferences for preference changes.\n"
             "- Call store_user_fact for durable facts.\n"
+            "- If the user says what they are interested in (e.g. 'my main interest is AI/tech/innovation', 'I like X', 'I prefer Y') you MUST call update_user_preferences.\n"
+            "- If the user states their role/job (e.g. 'I am an AI engineer') you SHOULD store it as a fact AND also update preferences if interests are mentioned.\n"
             "- Your final response MUST be a valid JSON OBJECT (an instance), matching this EXACT structure:\n"
             '{"updated": <true|false>, "summary": "<string>"}\n'
             "Example valid response:\n"
