@@ -7,8 +7,13 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
-# Install system dependencies for WeasyPrint
+# Install system dependencies for WeasyPrint and Node.js (for npx)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends \
+    nodejs \
     python3-pip \
     python3-cffi \
     python3-brotli \
@@ -29,8 +34,13 @@ FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
-# Copy system dependencies from builder
+# Install Node.js (for npx) and WeasyPrint dependencies in final stage
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends \
+    nodejs \
     libpango-1.0-0 \
     libharfbuzz0b \
     libpangoft2-1.0-0 \
