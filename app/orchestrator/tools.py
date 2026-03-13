@@ -214,25 +214,47 @@ def _init_semantic_memory():
 
 
 async def _embed_texts(texts: list[str]) -> list[list[float]]:
-    """Compute embeddings for a list of texts using Langchain HuggingFaceEndpointEmbeddings."""
+    """Compute embeddings for a list of texts using direct HF Inference API calls."""
     if not texts:
         return []
 
-    index, is_ready = _init_semantic_memory()
-    if not is_ready:
+    if not settings.hf_token:
+        log.warning("HF_TOKEN missing, skipping embeddings")
         return []
 
-    try:
-        embeddings_model = HuggingFaceEndpointEmbeddings(
-            model=settings.hf_embedding_model,
-            huggingfacehub_api_token=settings.hf_token,
-        )
-        # aembed_documents uses asyncio under the hood
-        result = await embeddings_model.aembed_documents(texts)
-        return result
-    except Exception as exc:
-        log.warning("Embedding encode failed via LangChain HF endpoint: %s", exc)
-        return []
+    model = settings.hf_embedding_model or "intfloat/multilingual-e5-large"
+    url = f"https://router.huggingface.co/hf-inference/models/{model}/pipeline/feature-extraction"
+
+    headers = {
+        "Authorization": f"Bearer {settings.hf_token}",
+        "Content-Type": "application/json",
+    }
+
+    async def _fetch_one(text: str) -> list[float] | None:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(url, json={"inputs": text}, headers=headers)
+                if resp.status_code != 200:
+                    log.warning("HF API error %d: %s", resp.status_code, resp.text)
+                    return None
+
+                data = resp.json()
+                if isinstance(data, list) and data:
+                    vec = data[0] if isinstance(data[0], list) else data
+                    return [float(x) for x in vec]
+                return None
+        except Exception as e:
+            log.warning("HF embedding request failed for text: %s", e)
+            return None
+
+    # Process texts. For large lists, we could use asyncio.gather, but usually it's 1-5 texts.
+    results = []
+    for text in texts:
+        vec = await _fetch_one(text)
+        if vec:
+            results.append(vec)
+
+    return results
 
 
 async def _semantic_upsert(

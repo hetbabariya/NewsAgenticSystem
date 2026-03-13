@@ -19,6 +19,7 @@ langchain-mcp-adapters==0.1.4
 
 apscheduler==3.10.4
 httpx==0.27.0
+aiohttp==3.10.10
 weasyprint==62.3
 pydyf==0.10.0
 rich==13.7.1

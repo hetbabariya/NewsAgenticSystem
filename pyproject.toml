@@ -21,6 +21,7 @@ dependencies = [
     "python-telegram-bot==21.6",
     "sqlalchemy>=2.0.48",
     "uvicorn[standard]==0.30.6",
+    "aiohttp==3.10.10",
     "weasyprint==62.3",
     "pydyf==0.10.0",
     "rich>=13.7.1",
