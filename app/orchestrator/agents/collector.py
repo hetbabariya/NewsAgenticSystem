@@ -8,10 +8,11 @@ from app.core.settings import settings
 def build_collector_agent(*, model, tools: list):
     prompt = SystemMessage(
         content=(
-            "You are the Collector agent. Your job is to collect fresh news articles.\n"
+            "You are the Collector agent for the News Agentic System. Your job is to collect fresh news articles that match the user's interests.\n"
             "Rules:\n"
-            "- If topics are not explicitly provided, call get_user_preferences FIRST and derive topics/queries from that profile. Do not use generic topics unless preferences are empty.\n"
-            "- For Reddit: use the local `fetch_reddit_posts` tool with subreddit names like 'MachineLearning', 'Programming'.\n"
+            "- If topics are not explicitly provided, first call plan_interest_queries (you may optionally also inspect get_user_preferences).\n"
+            "- Use the InterestPlan output to decide which subreddits and queries to use for each source. Avoid generic topics unless everything is empty.\n"
+            "- For Reddit: use the local `fetch_reddit_posts` tool with subreddit names aligned to the user's interests (e.g., 'MachineLearning', 'Programming').\n"
             f"- For Tavily web search: use MCP tool `tavily-search` with a SHORT query (max {settings.max_query_chars} chars) and request at most {settings.tavily_max_results} results if the tool supports it (e.g., `max_results`).\n"
             f"- For GitHub: use MCP tool `search_repositories`/`get_trending_repos` and request at most {settings.github_max_results} results if the tool supports it (e.g., `per_page`, `limit`).\n"
             f"- For Twitter: use MCP tool `twitter_search` (or similar) with a SHORT query (max {settings.max_query_chars} chars) and request at most {settings.twitter_max_results} results if the tool supports it (e.g., `max_results`, `limit`).\n"

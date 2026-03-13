@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from langchain_core.tools import tool
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
+from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from weasyprint import HTML
 
 from app.core.settings import settings
@@ -136,6 +137,138 @@ def _sanitize_article(a: dict) -> dict:
 _groq_key_idx = 0
 _openrouter_key_idx = 0
 
+# --- Semantic memory / Pinecone (lazy-init) ---
+
+_pinecone_index = None
+_emb_model = None
+_semantic_initialized = False
+
+
+def _guess_embedding_dimension(model_name: str | None) -> int:
+    m = (model_name or "").lower()
+    # Common lightweight sentence embedding models.
+    if "bge-small" in m:
+        return 384
+    if "minilm" in m:
+        return 384
+    # Conservative fallback.
+    return 768
+
+
+def _init_semantic_memory():
+    """
+    Lazy initializer for Pinecone index.
+    Uses Hugging Face API for embeddings, so local model is not needed.
+
+    Fails gracefully (returns (None, None)) if Pinecone is not configured.
+    """
+    global _pinecone_index, _semantic_initialized
+    if _semantic_initialized:
+        return _pinecone_index, True
+
+    _semantic_initialized = True
+
+    if not settings.pinecone_api_key:
+        log.info("Pinecone not configured (PINECONE_API_KEY missing) — semantic memory disabled.")
+        return None, None
+
+    try:
+        from pinecone import Pinecone, ServerlessSpec
+    except Exception as exc:  # ImportError or other
+        log.warning("pinecone-client not installed or failed to import: %s", exc)
+        return None, None
+
+    try:
+        pc = Pinecone(api_key=settings.pinecone_api_key)
+        index_name = (settings.pinecone_index_name or "newsagent").strip()
+        if not index_name:
+            index_name = "newsagent"
+
+        existing: list[str] = []
+        try:
+            li = pc.list_indexes()
+            if hasattr(li, "names"):
+                existing = list(li.names())
+            elif isinstance(li, list):
+                existing = [str(idx.get("name")) for idx in li if isinstance(idx, dict) and idx.get("name")]
+        except Exception:
+            existing = []
+        if index_name not in existing:
+            # Default small serverless index suitable for semantic memory.
+            pc.create_index(
+                name=index_name,
+                dimension=_guess_embedding_dimension(getattr(settings, "hf_embedding_model", None)),
+                metric="cosine",
+                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+            )
+
+        _pinecone_index = pc.Index(index_name)
+    except Exception as exc:
+        log.warning("Failed to initialize Pinecone index: %s", exc)
+        _pinecone_index = None
+
+    if _pinecone_index is None:
+        log.info("Semantic memory partially initialized (index failed)")
+        return None, None
+
+    return _pinecone_index, True
+
+
+async def _embed_texts(texts: list[str]) -> list[list[float]]:
+    """Compute embeddings for a list of texts using Langchain HuggingFaceEndpointEmbeddings."""
+    if not texts:
+        return []
+
+    index, is_ready = _init_semantic_memory()
+    if not is_ready:
+        return []
+
+    try:
+        embeddings_model = HuggingFaceEndpointEmbeddings(
+            model=settings.hf_embedding_model,
+            huggingfacehub_api_token=settings.hf_token,
+        )
+        # aembed_documents uses asyncio under the hood
+        result = await embeddings_model.aembed_documents(texts)
+        return result
+    except Exception as exc:
+        log.warning("Embedding encode failed via LangChain HF endpoint: %s", exc)
+        return []
+
+
+async def _semantic_upsert(
+    *,
+    item_id: str,
+    text: str,
+    metadata: dict,
+) -> None:
+    """Upsert a single semantic memory item into Pinecone."""
+    if not text or not item_id:
+        return
+
+    index, _ = _init_semantic_memory()
+    if index is None:
+        return
+
+    vectors = await _embed_texts([text])
+    if not vectors:
+        return
+
+    vec = vectors[0]
+
+    # Ensure there is always some searchable text in metadata.
+    meta = dict(metadata or {})
+    if not meta.get("text"):
+        meta["text"] = (text or "")[:2000]
+
+    def _do_upsert() -> None:
+        try:
+            index.upsert(vectors=[{"id": item_id, "values": vec, "metadata": meta}])
+        except Exception as exc:
+            log.warning("Pinecone upsert failed for %s: %s", item_id, exc)
+
+    await asyncio.to_thread(_do_upsert)
+
 # --- Pydantic Models for Structured Output ---
 
 class ScoredArticle(BaseModel):
@@ -166,6 +299,38 @@ class UserFact(BaseModel):
     fact: str = Field(description="The normalized fact about the user")
     category: str = Field(description="Category of the fact (e.g., job, preference, schedule)")
     importance: int = Field(description="How much this should influence behavior (1-5)", ge=1, le=5)
+
+
+class SemanticMatch(BaseModel):
+    id: str = Field(description="The internal id of the memory item")
+    score: float = Field(description="Similarity score (higher is more similar)")
+    type: str = Field(description="Type of memory item (summary, fact, preference)")
+    text: str = Field(description="Primary text for this memory (summary text or fact)")
+    metadata: dict = Field(description="Additional metadata (tags, importance, etc.)")
+
+
+class InterestPlan(BaseModel):
+    """Plan of what to search given everything the system knows about the user."""
+
+    topics: List[str] = Field(description="High-level topics representing the user's current interests")
+    reddit_subreddits: List[str] = Field(description="Concrete subreddit names to use for Reddit fetches")
+    web_queries: List[str] = Field(description="Short news-style web search queries (NOT definitions)")
+    github_queries: List[str] = Field(description="Short queries to discover repos/issues relevant to the user")
+    twitter_queries: List[str] = Field(description="Short queries to discover tweets/threads relevant to the user")
+    summary: str = Field(description="Natural language explanation of why these queries match the user's interests")
+
+
+class NewspaperArticleEdited(BaseModel):
+    """LLM-generated editorial fields for one newspaper article."""
+    summary_id: str = Field(description="The id of the summary this refers to (pass through unchanged)")
+    headline: str = Field(description="A crisp, punchy newspaper headline (max 12 words, title case, NO full-stop)")
+    deck: str = Field(description="One-sentence subheading elaborating the headline (max 25 words)")
+    source_label: str = Field(description="Reader-friendly attribution, e.g. 'Reddit · r/MachineLearning' or 'Web' or 'Twitter'")
+
+
+class NewspaperEdition(BaseModel):
+    """Full set of editorial overrides for the day's newspaper."""
+    articles: List[NewspaperArticleEdited] = Field(description="One entry per article, in the same order as input")
 
 # --- LLM Helper ---
 
@@ -658,17 +823,22 @@ async def run_summarizer(
             inserted = False
 
             try:
+                meta = {"key_points": summary.key_points, "tags": summary.tags}
                 await execute(
                     """
-                    INSERT INTO summaries (source_id, summary_text, relevance_score, metadata)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO summaries (source_id, summary_text, relevance_score, metadata, pinecone_id)
+                    VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT (source_id) DO UPDATE SET
                         summary_text = EXCLUDED.summary_text,
                         relevance_score = EXCLUDED.relevance_score,
-                        metadata = EXCLUDED.metadata
+                        metadata = EXCLUDED.metadata,
+                        pinecone_id = EXCLUDED.pinecone_id
                     """,
-                    summary.source_id, summary.summary_text, score,
-                    json.dumps({"key_points": summary.key_points, "tags": summary.tags})
+                    summary.source_id,
+                    summary.summary_text,
+                    score,
+                    json.dumps(meta),
+                    str(summary.source_id),
                 )
 
                 inserted = True
@@ -677,6 +847,21 @@ async def run_summarizer(
                     "UPDATE raw_articles SET status = 'summarized' WHERE id = $1",
                     summary.source_id,
                 )
+
+                # Upsert semantic representation into Pinecone (best-effort).
+                try:
+                    full_text = f"{summary.summary_text}\n\nTags: {', '.join(summary.tags)}"
+                    await _semantic_upsert(
+                        item_id=str(summary.source_id),
+                        text=full_text,
+                        metadata={
+                            "type": "summary",
+                            "score": float(score or 0.0),
+                            "tags": summary.tags,
+                        },
+                    )
+                except Exception as sem_exc:
+                    log.warning("Failed to upsert summary %s into semantic memory: %s", summary.source_id, sem_exc)
             except Exception as ins_err:
                 log.error("Failed to insert summary for source %s: %s", summary.source_id, ins_err)
 
@@ -730,10 +915,32 @@ async def update_user_preferences(change_description: str) -> dict:
         new_prefs = {
             "topics": list(set(update.new_topics)),
             "keywords": list(set(update.new_keywords)),
-            "excluded_topics": list(set(update.excluded_topics))
+            "excluded_topics": list(set(update.excluded_topics)),
         }
 
         await execute("INSERT INTO preferences (prefs_json) VALUES ($1)", json.dumps(new_prefs))
+
+        # Also store a semantic preference snapshot so future runs can reason over it.
+        try:
+            prefs_text = (
+                "User preference profile. "
+                f"Topics: {', '.join(new_prefs['topics'])}. "
+                f"Keywords: {', '.join(new_prefs['keywords'])}. "
+                f"Excluded: {', '.join(new_prefs['excluded_topics'])}."
+            )
+            # Use a deterministic id so future updates overwrite rather than explode memory.
+            pref_id = "user-preferences"
+            await _semantic_upsert(
+                item_id=pref_id,
+                text=prefs_text,
+                metadata={
+                    "type": "preference",
+                    "importance": 5,
+                },
+            )
+        except Exception as sem_exc:
+            log.warning("Failed to upsert preferences into semantic memory: %s", sem_exc)
+
         return {"updated": True, "message": update.summary}
     except Exception as e:
         log.error("Preference update failed: %s", e)
@@ -762,12 +969,53 @@ async def store_user_fact(fact: str) -> dict:
     chain = template | model | parser
     try:
         extracted: UserFact = await chain.ainvoke({"fact": fact})
-        from app.db.neon import write_episodic
+
+        # Persist as episodic memory (for audit/history)...
+        from app.db.neon import write_episodic, fetch_val
+
         await write_episodic(
             event_type="user_fact",
             description=extracted.fact,
-            metadata={"category": extracted.category, "importance": extracted.importance}
+            metadata={"category": extracted.category, "importance": extracted.importance},
         )
+
+        # ...and as long-term semantic memory in semantic_facts + Pinecone.
+        try:
+            fact_id = await fetch_val(
+                """
+                INSERT INTO semantic_facts (fact_text, pinecone_id)
+                VALUES ($1, NULL)
+                RETURNING id
+                """,
+                extracted.fact,
+            )
+        except Exception as db_exc:
+            log.warning("Failed to insert semantic_fact row: %s", db_exc)
+            fact_id = None
+
+        if fact_id is not None:
+            try:
+                fact_id_str = str(fact_id)
+                await _semantic_upsert(
+                    item_id=fact_id_str,
+                    text=extracted.fact,
+                    metadata={
+                        "type": "fact",
+                        "category": extracted.category,
+                        "importance": int(extracted.importance),
+                    },
+                )
+                try:
+                    await execute(
+                        "UPDATE semantic_facts SET pinecone_id = $1 WHERE id = $2",
+                        fact_id_str,
+                        fact_id,
+                    )
+                except Exception as upd_exc:
+                    log.warning("Failed to update semantic_facts.pinecone_id: %s", upd_exc)
+            except Exception as sem_exc:
+                log.warning("Failed to upsert user fact into semantic memory: %s", sem_exc)
+
         return {"stored": True, "message": f"Stored fact: {extracted.fact}"}
     except Exception as e:
         log.error("Fact storage failed: %s", e)
@@ -785,11 +1033,20 @@ async def generate_newspaper_pdf(summaries: list[dict] | None = None) -> dict:
     if summaries is None:
         rows = await fetch_all(
             """
-            SELECT id, summary_text, relevance_score, created_at, metadata
-            FROM summaries
-            WHERE created_at >= NOW() - INTERVAL '24 hours'
-              AND sent_newspaper = FALSE
-            ORDER BY relevance_score DESC
+            SELECT
+                s.id,
+                s.summary_text,
+                s.relevance_score,
+                s.created_at,
+                s.metadata,
+                a.title   AS article_title,
+                a.url     AS article_url,
+                a.source  AS article_source
+            FROM summaries s
+            LEFT JOIN raw_articles a ON a.id = s.source_id
+            WHERE s.created_at >= NOW() - INTERVAL '24 hours'
+              AND s.sent_newspaper = FALSE
+            ORDER BY s.relevance_score DESC
             """
         )
         summaries = [dict(r) for r in rows]
@@ -798,7 +1055,15 @@ async def generate_newspaper_pdf(summaries: list[dict] | None = None) -> dict:
         return {"pdf_path": None, "articles_count": 0, "message": "No summaries found."}
 
     date_str = datetime.now().strftime("%B %d, %Y")
-    articles_html = ""
+    day_str  = datetime.now().strftime("%A").upper()
+
+    # --- Separate company/finance articles from general news ---
+    COMPANY_TAGS = {"company","stock","earnings","market","finance","startup",
+                    "ipo","acquisition","merger","investment","funding"}
+
+    regular_articles: list[dict] = []
+    company_insights: list[dict] = []
+
     for s in summaries:
         raw_meta = s.get("metadata")
         meta: dict = {}
@@ -811,47 +1076,353 @@ async def generate_newspaper_pdf(summaries: list[dict] | None = None) -> dict:
                     meta = parsed
             except Exception:
                 meta = {}
+        s["_meta"] = meta
+        tags_lower = {t.lower() for t in (meta.get("tags") or [])}
+        if tags_lower & COMPANY_TAGS:
+            company_insights.append(s)
+        else:
+            regular_articles.append(s)
 
-        key_points = "".join([f"<li>{p}</li>" for p in (meta.get("key_points") or [])])
-        tags = ", ".join(meta.get("tags") or [])
-        articles_html += f"""
-        <div class="article">
-            <p class="summary">{s.get('summary_text')}</p>
-            <ul>{key_points}</ul>
-            <p class="meta">Tags: {tags} | Score: {s.get('relevance_score')}</p>
-        </div>
-        <hr/>"""
+    # -----------------------------------------------------------------------
+    # LLM pass: generate newspaper-quality headlines, decks, and source labels
+    # for every article in one batch call.
+    # -----------------------------------------------------------------------
+    async def _generate_editorial(articles: list[dict]) -> dict[str, NewspaperArticleEdited]:
+        """Return a mapping of summary id -> editorial fields. Fails gracefully."""
+        if not articles:
+            return {}
+        try:
+            model = await _get_model("groq")
+            parser = PydanticOutputParser(pydantic_object=NewspaperEdition)
+            articles_text = "\n\n".join(
+                (
+                    f"ID: {s['id']}\n"
+                    f"Summary: {(s.get('summary_text') or '')[:600]}\n"
+                    f"Key points: {'; '.join((s.get('_meta') or {}).get('key_points') or [])}\n"
+                    f"Tags: {', '.join((s.get('_meta') or {}).get('tags') or [])}\n"
+                    f"Raw source label: {s.get('article_source') or 'unknown'}"
+                )
+                for s in articles
+            )
+            template = PromptTemplate(
+                template=(
+                    "You are the chief editor of a newspaper called 'The Agentic Daily'.\n"
+                    "For each article below, produce:\n"
+                    "  1. `headline` — punchy, title-case, max 12 words, no trailing full-stop.\n"
+                    "  2. `deck` — one-sentence subheading, max 25 words.\n"
+                    "  3. `source_label` — friendly attribution such as:\n"
+                    "       'Reddit · r/MachineLearning', 'Web', 'Twitter', 'GitHub', etc.\n"
+                    "     Derive it from the raw_source field; keep it very short.\n"
+                    "ARTICLES:\n{articles_text}\n\n{format_instructions}\n"
+                    "CRITICAL: Return ONLY the JSON object — no markdown, no commentary."
+                ),
+                input_variables=["articles_text"],
+                partial_variables={"format_instructions": parser.get_format_instructions()},
+            )
+            chain = template | model | parser
+            edition: NewspaperEdition = await chain.ainvoke({"articles_text": articles_text})
+            return {art.summary_id: art for art in edition.articles}
+        except Exception as exc:
+            log.warning("Newspaper editorial LLM call failed: %s", exc)
+            return {}
 
-    html_template = f"<html><body><h1>The Agentic Daily</h1><p>{date_str}</p>{articles_html}</body></html>"
+    # Run editorial generation for all articles together
+    all_summaries_for_editorial = regular_articles + company_insights
+    editorial_map = await _generate_editorial(all_summaries_for_editorial)
+
+    def _apply_editorial(s: dict) -> dict:
+        """Merge LLM-generated editorial fields onto a summary dict."""
+        art = editorial_map.get(str(s.get("id")))
+        if art:
+            s["_headline"]     = art.headline
+            s["_deck"]         = art.deck
+            s["_source_label"] = art.source_label
+        else:
+            # Graceful fallback: first sentence of summary_text as headline
+            raw = (s.get("summary_text") or "").strip()
+            s["_headline"] = raw[:80] + ("…" if len(raw) > 80 else "")
+            s["_deck"]     = ""
+            s["_source_label"] = (s.get("article_source") or "").replace("/", " · ")
+        return s
+
+    regular_articles  = [_apply_editorial(s) for s in regular_articles]
+    company_insights  = [_apply_editorial(s) for s in company_insights]
+
+    # -----------------------------------------------------------------------
+    def _make_source_line(art_url: str, source_label: str) -> str:
+        if art_url and source_label:
+            return (f'<p class="source-line">Source: <strong>{source_label}</strong>'
+                    f' &mdash; <a href="{art_url}">{art_url}</a></p>')
+        elif art_url:
+            return f'<p class="source-line"><a href="{art_url}">{art_url}</a></p>'
+        elif source_label:
+            return f'<p class="source-line">Source: <strong>{source_label}</strong></p>'
+        return ""
+
+    def _article_html(s: dict, lead: bool = False) -> str:
+        meta         = s.get("_meta", {})
+        key_points   = meta.get("key_points") or []
+        tags         = meta.get("tags") or []
+        summary      = (s.get("summary_text") or "").strip()
+        headline     = s.get("_headline") or summary[:80]
+        deck         = s.get("_deck") or ""
+        source_label = s.get("_source_label") or ""
+        art_url      = (s.get("article_url") or "").strip()
+        bullets_html = "".join(f"<li>{p}</li>" for p in key_points)
+        tag_pills    = "".join(f'<span class="tag">{t}</span>' for t in tags[:6])
+        source_html  = _make_source_line(art_url, source_label)
+        deck_html    = f'<p class="deck">{deck}</p>' if deck else ""
+        if lead:
+            return (
+                '<article class="article lead">'
+                f'<h2 class="headline">{headline}</h2>'
+                f'{deck_html}'
+                f'<ul class="bullets">{bullets_html}</ul>'
+                f'<p class="summary-body">{summary}</p>'
+                f'<div class="tag-row">{tag_pills}</div>'
+                f'{source_html}</article><hr class="divider"/>'
+            )
+        return (
+            '<article class="article">'
+            f'<h3 class="headline-small">{headline}</h3>'
+            f'{deck_html}'
+            f'<ul class="bullets">{bullets_html}</ul>'
+            f'<p class="summary-body">{summary}</p>'
+            f'<div class="tag-row">{tag_pills}</div>'
+            f'{source_html}</article>'
+        )
+
+    articles_html = "".join(
+        _article_html(s, lead=(idx == 0)) for idx, s in enumerate(regular_articles)
+    )
+
+    # Company insights block
+    insights_html = ""
+    if company_insights:
+        cards = ""
+        for s in company_insights:
+            meta         = s.get("_meta", {})
+            key_points   = meta.get("key_points") or []
+            tags         = meta.get("tags") or []
+            summary      = (s.get("summary_text") or "").strip()
+            headline     = s.get("_headline") or summary[:80]
+            deck         = s.get("_deck") or ""
+            source_label = s.get("_source_label") or ""
+            art_url      = (s.get("article_url") or "").strip()
+            bullets_html = "".join(f"<li>{p}</li>" for p in key_points)
+            tag_pills    = "".join(f'<span class="tag">{t}</span>' for t in tags[:6])
+            source_html  = _make_source_line(art_url, source_label)
+            deck_html    = f'<p class="deck">{deck}</p>' if deck else ""
+            cards += (
+                '<div class="insight-card">'
+                f'<h4 class="insight-title">{headline}</h4>'
+                f'{deck_html}'
+                f'<ul class="bullets">{bullets_html}</ul>'
+                f'<p class="summary-body">{summary}</p>'
+                f'<div class="tag-row">{tag_pills}</div>'
+                f'{source_html}</div>'
+            )
+        insights_html = (
+            '<section class="insights-section">'
+            '<h2 class="insights-heading">&#9642; Company &amp; Market Insights</h2>'
+            f'<div class="insights-grid">{cards}</div>'
+            '</section>'
+        )
 
     try:
         os.makedirs("temp", exist_ok=True)
         pdf_path = os.path.join("temp", f"newspaper_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
 
-        # Injected CSS to handle potential Fontconfig issues by using generic fonts
         css = """
-        @page { size: A4; margin: 2cm; }
-        body { font-family: serif; line-height: 1.6; color: #333; }
-        h1 { color: #2c3e50; text-align: center; border-bottom: 2px solid #2c3e50; padding-bottom: 10px; }
-        .date { text-align: center; font-style: italic; color: #7f8c8d; margin-bottom: 30px; }
-        .article { margin-bottom: 25px; page-break-inside: avoid; }
-        .summary { font-weight: bold; font-size: 1.1em; margin-bottom: 10px; }
-        ul { margin-top: 5px; margin-bottom: 10px; }
-        .meta { font-size: 0.9em; color: #95a5a6; border-top: 1px solid #eee; padding-top: 5px; }
+        @page { size: A4; margin: 1.8cm 1.5cm; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: "Georgia", "Times New Roman", serif;
+            line-height: 1.55;
+            color: #1a1a1a;
+            background: #fdfaf4;
+            font-size: 10pt;
+        }
+        .masthead {
+            text-align: center;
+            border-top: 4px double #1a1a1a;
+            border-bottom: 4px double #1a1a1a;
+            padding: 10px 0 8px 0;
+            margin-bottom: 6px;
+        }
+        .masthead-eyebrow {
+            font-size: 7.5pt;
+            letter-spacing: 0.22em;
+            text-transform: uppercase;
+            color: #555;
+            margin-bottom: 2px;
+        }
+        .masthead-title {
+            font-size: 36pt;
+            font-weight: bold;
+            line-height: 1;
+            color: #111;
+            letter-spacing: 0.04em;
+        }
+        .masthead-tagline {
+            font-size: 8pt;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: #666;
+            margin-top: 4px;
+            font-style: italic;
+        }
+        .masthead-meta {
+            display: flex;
+            justify-content: space-between;
+            font-size: 7.5pt;
+            color: #555;
+            border-top: 1px solid #aaa;
+            margin-top: 6px;
+            padding-top: 4px;
+        }
+        .section-banner {
+            background: #1a1a1a;
+            color: #fdfaf4;
+            text-align: center;
+            padding: 3px 0;
+            font-size: 8pt;
+            letter-spacing: 0.2em;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }
+        .front-page {
+            column-count: 2;
+            column-gap: 20px;
+            column-rule: 1px solid #bbb;
+        }
+        .article {
+            break-inside: avoid;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #ccc;
+        }
+        .article:last-child { border-bottom: none; }
+        .article.lead {
+            column-span: all;
+            border-bottom: 2px solid #1a1a1a;
+            margin-bottom: 14px;
+            padding-bottom: 12px;
+        }
+        .headline {
+            font-size: 22pt;
+            font-weight: bold;
+            line-height: 1.15;
+            margin-bottom: 6px;
+            color: #111;
+        }
+        .headline-small {
+            font-size: 13pt;
+            font-weight: bold;
+            line-height: 1.2;
+            margin-bottom: 5px;
+            color: #111;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 3px;
+        }
+        .bullets {
+            margin: 5px 0 6px 16px;
+            font-size: 9.5pt;
+        }
+        .bullets li { margin-bottom: 3px; }
+        .deck {
+            font-size: 10pt;
+            font-style: italic;
+            color: #444;
+            margin: 2px 0 6px 0;
+            line-height: 1.4;
+        }
+        .summary-body {
+            font-size: 9.5pt;
+            line-height: 1.6;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        .tag-row { margin: 4px 0; }
+        .tag {
+            display: inline-block;
+            font-size: 7pt;
+            font-family: Arial, sans-serif;
+            background: #e8e4da;
+            border: 1px solid #c8c0ad;
+            color: #444;
+            border-radius: 2px;
+            padding: 1px 5px;
+            margin: 1px 2px 1px 0;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+        .source-line {
+            font-size: 7.5pt;
+            color: #777;
+            font-family: Arial, sans-serif;
+            margin-top: 4px;
+            border-top: 1px dotted #ccc;
+            padding-top: 3px;
+            word-break: break-all;
+        }
+        .source-line a { color: #3a5fa0; text-decoration: none; }
+        .divider { display: none; }
+        .insights-section {
+            margin-top: 18px;
+            border-top: 3px double #1a1a1a;
+            padding-top: 10px;
+        }
+        .insights-heading {
+            font-size: 11pt;
+            font-weight: bold;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+            color: #111;
+        }
+        .insights-grid {
+            column-count: 2;
+            column-gap: 20px;
+            column-rule: 1px solid #bbb;
+        }
+        .insight-card {
+            break-inside: avoid;
+            background: #f4f0e6;
+            border: 1px solid #d4cbb5;
+            border-radius: 2px;
+            padding: 8px 10px;
+            margin-bottom: 10px;
+        }
+        .insight-title {
+            font-size: 10pt;
+            font-weight: bold;
+            margin-bottom: 4px;
+            color: #111;
+        }
         """
 
-        # Use a simpler HTML structure for better reliability
-        full_html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head><style>{css}</style></head>
-        <body>
-            <h1>The Agentic Daily</h1>
-            <p class="date">{date_str}</p>
-            {articles_html}
-        </body>
-        </html>
-        """
+        edition_num = datetime.now().strftime("Vol. %Y, No. %j")
+        total_count = len(summaries)
+        full_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/><style>{css}</style></head>
+<body>
+  <header class="masthead">
+    <p class="masthead-eyebrow">Your Personalised Intelligence Digest</p>
+    <div class="masthead-title">The Agentic Daily</div>
+    <p class="masthead-tagline">Intelligent News &mdash; Curated Just For You</p>
+    <div class="masthead-meta">
+      <span>{edition_num}</span>
+      <span>{day_str}, {date_str.upper()}</span>
+      <span>{total_count} Articles</span>
+    </div>
+  </header>
+  <div class="section-banner">Today&rsquo;s Top Stories</div>
+  <section class="front-page">{articles_html}</section>
+  {insights_html}
+</body>
+</html>"""
 
         HTML(string=full_html).write_pdf(pdf_path)
         agent_logger.log_tool_result("generate_newspaper_pdf", f"PDF path: {pdf_path}")
@@ -868,11 +1439,23 @@ async def generate_newspaper_pdf(summaries: list[dict] | None = None) -> dict:
         try:
             txt_path = pdf_path.replace(".pdf", ".txt")
             with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(f"The Agentic Daily - {date_str}\n\n")
-                # Strip HTML for text fallback
-                import re
-                clean_html = re.sub('<[^<]+?>', '', articles_html)
-                f.write(clean_html)
+                f.write(f"The Agentic Daily \u2014 {date_str}\n")
+                f.write("=" * 60 + "\n\n")
+                for s in summaries:
+                    meta       = s.get("_meta") or {}
+                    key_points = meta.get("key_points") or []
+                    art_title  = (s.get("article_title") or "").strip()
+                    art_url    = (s.get("article_url") or "").strip()
+                    art_source = (s.get("article_source") or "").strip()
+                    summary    = (s.get("summary_text") or "").strip()
+                    f.write(f"## {art_title or 'News Briefing'}\n")
+                    for pt in key_points:
+                        f.write(f"  \u2022 {pt}\n")
+                    if summary:
+                        f.write(f"\n{summary}\n")
+                    if art_source or art_url:
+                        f.write(f"\nSource: {art_source}  {art_url}\n")
+                    f.write("\n" + "-" * 60 + "\n\n")
             upload = await _upload_file_to_supabase_storage(file_path=txt_path, content_type="text/plain")
             return {
                 "pdf_path": txt_path,
@@ -883,6 +1466,133 @@ async def generate_newspaper_pdf(summaries: list[dict] | None = None) -> dict:
         except Exception as txt_e:
             log.error("Text fallback also failed: %s", txt_e)
             return {"error": str(e), "pdf_path": None, "articles_count": len(summaries)}
+
+
+@tool
+async def semantic_search_memory(query: str, top_k: int = 5) -> dict:
+    """
+    Search long-term semantic memory (summaries, user facts, preferences) using Pinecone.
+
+    Returns the most similar items across:
+      - Summaries stored by the summarizer (type='summary')
+      - User facts captured via store_user_fact (type='fact')
+      - Preference snapshots (type='preference')
+    """
+    q = (query or "").strip()
+    if not q:
+        return {"matches": [], "count": 0, "message": "Empty query."}
+
+    index, _ = _init_semantic_memory()
+    if index is None:
+        return {"matches": [], "count": 0, "message": "Semantic memory not configured."}
+
+    vectors = await _embed_texts([q])
+    if not vectors:
+        return {"matches": [], "count": 0, "message": "Embedding model not available."}
+
+    vec = vectors[0]
+
+    def _do_query() -> Any:
+        try:
+            return index.query(
+                vector=vec,
+                top_k=max(1, min(int(top_k or 5), 20)),
+                include_metadata=True,
+            )
+        except Exception as exc:
+            log.warning("Pinecone query failed: %s", exc)
+            return None
+
+    res = await asyncio.to_thread(_do_query)
+    if not res or not getattr(res, "matches", None):
+        return {"matches": [], "count": 0, "message": "No semantic matches found."}
+
+    matches: list[dict] = []
+    for m in res.matches:
+        meta = dict(getattr(m, "metadata", {}) or {})
+        text = meta.get("text") or meta.get("summary_text") or meta.get("fact_text") or ""
+        matches.append(
+            {
+                "id": getattr(m, "id", None),
+                "score": float(getattr(m, "score", 0.0)),
+                "type": meta.get("type") or "unknown",
+                "text": text,
+                "metadata": meta,
+            }
+        )
+
+    return {"matches": matches, "count": len(matches)}
+
+
+@tool
+async def plan_interest_queries(hint: str | None = None) -> dict:
+    """
+    Plan concrete search queries based on the user's interests and long-term memory.
+
+    This tool makes the system intelligent about WHAT to search:
+      - It looks at stored preferences.
+      - It can leverage semantic memory indirectly via those preferences and facts.
+      - It returns source-specific queries that should yield news, not generic explanations.
+    """
+    current_prefs = await get_preferences()
+
+    # Compact representation for the LLM; we keep table as a backing store but the plan
+    # itself is recomputed dynamically each time this tool is called.
+    model = await _get_model("groq")
+    parser = PydanticOutputParser(pydantic_object=InterestPlan)
+
+    template = PromptTemplate(
+        template="""You are an interest planner for a news agent.
+
+User preference snapshot (may be partial or noisy):
+{current_prefs}
+
+Optional hint or latest user statement:
+{hint}
+
+Your job is to decide WHAT to search to get fresh, real news that matches the user's interests.
+
+Guidelines:
+- Never propose definition-style queries like "what is AI" or "what is machine learning".
+- Always propose news-style, event- or trend-focused queries such as
+  "latest AI research breakthroughs", "LLM safety incidents", "startup funding for AI infra".
+- Subreddits should be concrete and aligned with interests (e.g., 'MachineLearning', 'LocalLLaMA', 'DataScience', 'programming').
+- Queries must be SHORT (ideal length: 3–10 words) and suitable for the target source.
+- Prefer a small, focused set of topics and queries over many generic ones.
+- Use the excluded topics (if any) to AVOID proposing queries in those areas.
+
+{format_instructions}
+
+CRITICAL:
+- Return a single JSON object that matches the format instructions exactly.
+- Do NOT include definitions or tutorials as queries; everything should be news-oriented.
+""",
+        input_variables=["current_prefs", "hint"],
+        partial_variables={"format_instructions": parser.get_format_instructions()},
+    )
+
+    chain = template | model | parser
+    try:
+        plan: InterestPlan = await chain.ainvoke(
+            {
+                "current_prefs": json.dumps(current_prefs),
+                "hint": (hint or "").strip(),
+            }
+        )
+        return plan.model_dump()
+    except Exception as e:
+        log.error("plan_interest_queries failed: %s", e)
+        # Fallback: derive a trivial plan that is at least consumable.
+        topics = current_prefs.get("topics") or ["AI", "Machine Learning"]
+        safe_topics = [str(t) for t in topics][:5]
+        return {
+            "topics": safe_topics,
+            "reddit_subreddits": ["MachineLearning", "LocalLLaMA", "programming"],
+            "web_queries": [f"latest {t} news" for t in safe_topics],
+            "github_queries": [f"{t} tools" for t in safe_topics],
+            "twitter_queries": [f"{t} trend" for t in safe_topics],
+            "summary": "Fallback plan derived directly from preferences due to planner error.",
+        }
 
 LOCAL_TOOLS = [
     get_user_preferences,
@@ -897,4 +1607,6 @@ LOCAL_TOOLS = [
     store_user_fact,
     generate_newspaper_pdf,
     fetch_reddit_posts,
+    semantic_search_memory,
+    plan_interest_queries,
 ]

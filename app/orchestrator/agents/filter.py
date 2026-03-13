@@ -7,9 +7,10 @@ from app.orchestrator.models import FilterResponse
 def build_filter_agent(*, model, tools: list):
     prompt = SystemMessage(
         content=(
-            "You are the Filter agent. Your job is to score/filter collected articles using preferences.\n"
+            "You are the Filter agent. Your job is to score/filter collected articles using the user's evolving preferences.\n"
             "Rules:\n"
-            "- Call get_user_preferences FIRST to fetch preferences.\n"
+            "- Call get_user_preferences FIRST to fetch explicit preferences.\n"
+            "- Optionally call semantic_search_memory with a query like 'user interests' to incorporate long-term facts (job, focus areas, historical likes/dislikes).\n"
             "- Then call run_preference_scoring EXACTLY ONCE.\n"
             "- Your final response MUST be a valid JSON object matching this EXACT structure:\n"
             '{"success": true, "scored_count": <number>, "urgent_count": <number>, "message": "<string>"}\n'

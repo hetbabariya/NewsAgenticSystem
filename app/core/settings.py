@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     model_support: str = Field(default="arcee-ai/trinity-large-preview:free", validation_alias="MODEL_SUPPORT")
     model_publisher: str = Field(default="arcee-ai/trinity-large-preview:free", validation_alias="MODEL_PUBLISHER")
 
+    # Embeddings
+    hf_embedding_model: str = Field(default="sentence-transformers/all-MiniLM-L6-v2", validation_alias="HF_EMBEDDING_MODEL")
+
 
     def _split_csv(self, value: str | None) -> list[str]:
         if not value:

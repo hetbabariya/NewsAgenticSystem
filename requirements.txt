@@ -22,3 +22,8 @@ httpx==0.27.0
 weasyprint==62.3
 pydyf==0.10.0
 rich==13.7.1
+
+# Semantic memory
+pinecone-client==2.2.4
+langchain-huggingface==0.1.2
+huggingface_hub==0.24.6

@@ -5,10 +5,10 @@ import logging
 import os
 import uuid
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.runnables.config import RunnableConfig
 
-from app.db.neon import get_recent_conversation, log_conversation, write_episodic
+from app.db.neon import execute, get_recent_conversation, log_conversation, write_episodic
 from app.telegram.bot import send_document, send_message
 
 from app.core.settings import settings
@@ -370,19 +370,30 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
         text_l = text.lower()
         await log_conversation("user", text)
 
-        # # Fast-path: greetings/smalltalk should not trigger tool calls.
-        # greeting_tokens = {"hi", "hello", "hey", "hii", "hiii", "yo", "gm", "good morning", "good evening", "good night"}
-        # if text_l.strip() in greeting_tokens or any(text_l.strip().startswith(t + " ") for t in greeting_tokens):
-        #     final_text = "Hi! Tell me what you want: (1) update your interests, or (2) ask for news, or (3) run today’s digest."
-        #     await log_conversation("assistant", final_text)
-        #     result = {"messages": [HumanMessage(content=final_text)]}
-        #     agent_logger.log_final_answer("COORDINATOR", final_text)
-        #     return result
+        # Build short-term conversational memory (~last N turns) for agents.
+        try:
+            history = await get_recent_conversation(limit=10)
+        except Exception:
+            history = []
+
+        recent_messages: list[HumanMessage | AIMessage] = []
+        for h in history:
+            role = str(h.get("role") or "").lower()
+            content = str(h.get("content") or "")
+            if not content:
+                continue
+            if role == "user":
+                recent_messages.append(HumanMessage(content=content))
+            else:
+                # Treat any non-user role as assistant for context.
+                recent_messages.append(AIMessage(content=content))
+
         context = {
             "trigger": trigger,
             "payload": payload,
             "trace_id": trace,
             "chat_id": payload.get("chat_id"),
+            "recent_conversation": history,
         }
 
         # Heuristic: preference/fact updates -> memory, otherwise -> support.
@@ -426,8 +437,10 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
         else:
             agent_logger.log_agent_start("SUPPORT", "Handling user news question (deterministic telegram routing).")
             support = registry.get("support").build(shared_tools)
+            # Inject short-term memory as part of the messages list so the agent has context.
+            messages = list(recent_messages) + [HumanMessage(content=text)]
             result = await support.ainvoke(
-                {"messages": [HumanMessage(content=text)], "context": context},
+                {"messages": messages, "context": context},
                 config=RunnableConfig(recursion_limit=10),
             )
             agent_logger.log_final_answer(
@@ -435,10 +448,10 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
                 str(result.get("messages", [-1])[-1].content if result.get("messages") else "Done"),
             )
 
-            messages = result.get("messages")
+            messages_out = result.get("messages")
             final_text = None
-            if messages:
-                last = messages[-1]
+            if messages_out:
+                last = messages_out[-1]
                 final_text = getattr(last, "content", None)
             if final_text:
                 await log_conversation("assistant", str(final_text))
