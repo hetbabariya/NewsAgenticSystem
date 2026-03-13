@@ -8,4 +8,4 @@ ENV MCP_HTTP_PATH=/mcp
 # Default MCP command (can override in Render env vars)
 ENV MCP_STDIO_CMD="echo 'No MCP command set'"
 
-ENTRYPOINT ["sh", "-c", "if [ -z \"$MCP_STDIO_CMD\" ]; then echo 'Error: MCP_STDIO_CMD is not set'; exit 1; fi; echo \"Starting supergateway with command: $MCP_STDIO_CMD on port ${PORT:-8000}\"; exec supergateway --stdio \"$MCP_STDIO_CMD\" --port \"${PORT:-8000}\" --outputTransport \"${MCP_OUTPUT_TRANSPORT}\" --ssePath \"${MCP_SSE_PATH}\" --messagePath \"${MCP_MESSAGE_PATH}\" --streamableHttpPath \"${MCP_HTTP_PATH}\" --cors --healthEndpoint /healthz --baseUrl \"https://${RENDER_EXTERNAL_HOSTNAME:-localhost}\""]
+ENTRYPOINT ["sh", "-c", "if [ -z \"$MCP_STDIO_CMD\" ]; then echo 'Error: MCP_STDIO_CMD is not set'; exit 1; fi; echo \"Starting supergateway with command: $MCP_STDIO_CMD on port ${PORT:-8000}\"; exec supergateway --stdio \"$MCP_STDIO_CMD\" --port \"${PORT:-8000}\" --outputTransport \"${MCP_OUTPUT_TRANSPORT}\" --ssePath \"${MCP_SSE_PATH}\" --messagePath \"${MCP_MESSAGE_PATH}\" --streamableHttpPath \"${MCP_HTTP_PATH}\" --cors --healthEndpoint /healthz --healthEndpoint / --baseUrl \"https://${RENDER_EXTERNAL_HOSTNAME:-localhost}\""]
