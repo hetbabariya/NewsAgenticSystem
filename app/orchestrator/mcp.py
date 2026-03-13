@@ -17,7 +17,7 @@ def mcp_config() -> dict:
     #   MCP_TRANSPORT=http|sse  (default: http)
     #   MCP_AUTH_HEADER=Authorization
     #   MCP_AUTH_TOKEN=Bearer ...
-    transport = str(os.getenv("MCP_TRANSPORT", "http") or "http").strip().lower()
+    transport = str(os.getenv("MCP_TRANSPORT", "") or "").strip().lower()
     auth_header = str(os.getenv("MCP_AUTH_HEADER", "Authorization") or "Authorization").strip()
     auth_token = str(os.getenv("MCP_AUTH_TOKEN", "") or "").strip()
     common_headers = {auth_header: auth_token} if auth_token else {}
@@ -25,24 +25,24 @@ def mcp_config() -> dict:
     tavily_url = str(os.getenv("MCP_TAVILY_URL", "") or "").strip()
     if tavily_url:
         cfg["tavily"] = {
-            "transport": transport,
             "url": tavily_url,
+            "transport": transport or "sse",
             "headers": common_headers,
         }
 
     github_url = str(os.getenv("MCP_GITHUB_URL", "") or "").strip()
     if github_url:
         cfg["github"] = {
-            "transport": transport,
             "url": github_url,
+            "transport": transport or "sse",
             "headers": common_headers,
         }
 
     twitter_url = str(os.getenv("MCP_TWITTER_URL", "") or "").strip()
     if twitter_url:
         cfg["twitter"] = {
-            "transport": transport,
             "url": twitter_url,
+            "transport": transport or "sse",
             "headers": common_headers,
         }
 
