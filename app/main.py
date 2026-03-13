@@ -8,7 +8,9 @@ import os
 from fastapi import FastAPI
 
 from app.core.settings import settings
+from dotenv import load_dotenv
 
+load_dotenv()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LIFESPAN
@@ -17,7 +19,7 @@ from app.core.settings import settings
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log = logging.getLogger("main")
-    log.info("Starting NewsAgent...")
+    log.info("StartiAUTO_WARMUPng NewsAgent...")
 
     try:
         settings.validate()
@@ -41,6 +43,7 @@ async def lifespan(app: FastAPI):
             log.exception("Telegram webhook registration failed")
 
     auto = str(os.getenv("AUTO_WARMUP", "")).strip().lower()
+    print("auto: ",auto)
     if auto in {"1", "true", "yes"}:
         async def _auto_warmup() -> None:
             try:

@@ -13,7 +13,6 @@ from langchain_core.tools import tool
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_huggingface import HuggingFaceEndpointEmbeddings
-from weasyprint import HTML
 
 from app.core.settings import settings
 from app.core.logger import agent_logger
@@ -1237,9 +1236,136 @@ async def generate_newspaper_pdf(summaries: list[dict] | None = None) -> dict:
             '</section>'
         )
 
+    backend = str(os.getenv("PDF_BACKEND", "reportlab") or "reportlab").strip().lower()
+
     try:
         os.makedirs("temp", exist_ok=True)
         pdf_path = os.path.join("temp", f"newspaper_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+
+        if backend != "weasyprint":
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.units import cm
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, ListFlowable, ListItem
+
+            styles = getSampleStyleSheet()
+            title_style = ParagraphStyle(
+                name="NewspaperTitle",
+                parent=styles["Title"],
+                fontName="Helvetica-Bold",
+                fontSize=22,
+                leading=26,
+                spaceAfter=8,
+            )
+            meta_style = ParagraphStyle(
+                name="NewspaperMeta",
+                parent=styles["Normal"],
+                fontName="Helvetica",
+                fontSize=9,
+                leading=12,
+                textColor="#555555",
+                spaceAfter=10,
+            )
+            h_style = ParagraphStyle(
+                name="NewspaperHeadline",
+                parent=styles["Heading2"],
+                fontName="Helvetica-Bold",
+                fontSize=13,
+                leading=16,
+                spaceBefore=8,
+                spaceAfter=4,
+            )
+            deck_style = ParagraphStyle(
+                name="NewspaperDeck",
+                parent=styles["Normal"],
+                fontName="Helvetica-Oblique",
+                fontSize=10,
+                leading=13,
+                textColor="#444444",
+                spaceAfter=6,
+            )
+            body_style = ParagraphStyle(
+                name="NewspaperBody",
+                parent=styles["Normal"],
+                fontName="Helvetica",
+                fontSize=10,
+                leading=14,
+                spaceAfter=6,
+            )
+            source_style = ParagraphStyle(
+                name="NewspaperSource",
+                parent=styles["Normal"],
+                fontName="Helvetica",
+                fontSize=8,
+                leading=11,
+                textColor="#666666",
+                spaceAfter=10,
+            )
+
+            doc = SimpleDocTemplate(
+                pdf_path,
+                pagesize=A4,
+                leftMargin=1.5 * cm,
+                rightMargin=1.5 * cm,
+                topMargin=1.5 * cm,
+                bottomMargin=1.5 * cm,
+                title="The Agentic Daily",
+            )
+
+            edition_num = datetime.now().strftime("Vol. %Y, No. %j")
+            total_count = len(summaries)
+            story: list = []
+            story.append(Paragraph("The Agentic Daily", title_style))
+            story.append(Paragraph(f"{edition_num}  {day_str}, {date_str}  {total_count} Articles", meta_style))
+
+            def _safe(s: str) -> str:
+                return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+            def _add_article(s: dict) -> None:
+                meta = s.get("_meta", {})
+                key_points = meta.get("key_points") or []
+                summary = (s.get("summary_text") or "").strip()
+                headline = (s.get("_headline") or "").strip() or (summary[:80] + ("" if len(summary) > 80 else ""))
+                deck = (s.get("_deck") or "").strip()
+                source_label = (s.get("_source_label") or "").strip()
+                art_url = (s.get("article_url") or "").strip()
+
+                story.append(Paragraph(_safe(headline), h_style))
+                if deck:
+                    story.append(Paragraph(_safe(deck), deck_style))
+                if key_points:
+                    items = [ListItem(Paragraph(_safe(str(p)), body_style)) for p in key_points[:6]]
+                    story.append(ListFlowable(items, bulletType="bullet", leftIndent=14))
+                    story.append(Spacer(1, 6))
+                if summary:
+                    story.append(Paragraph(_safe(summary), body_style))
+                if source_label or art_url:
+                    src = ""
+                    if source_label:
+                        src += f"Source: {source_label}"
+                    if art_url:
+                        src += ("  " if src else "") + art_url
+                    story.append(Paragraph(_safe(src), source_style))
+
+            for s in regular_articles:
+                _add_article(s)
+
+            if company_insights:
+                story.append(PageBreak())
+                story.append(Paragraph("Company &amp; Market Insights", h_style))
+                for s in company_insights:
+                    _add_article(s)
+
+            doc.build(story)
+            agent_logger.log_tool_result("generate_newspaper_pdf", f"PDF path: {pdf_path}")
+            upload = await _upload_file_to_supabase_storage(file_path=pdf_path, content_type="application/pdf")
+            return {
+                "pdf_path": pdf_path,
+                "articles_count": len(summaries),
+                "message": "PDF generated successfully.",
+                "storage": upload,
+                "backend": backend,
+            }
 
         css = """
         @page { size: A4; margin: 1.8cm 1.5cm; }
@@ -1432,6 +1558,8 @@ async def generate_newspaper_pdf(summaries: list[dict] | None = None) -> dict:
 </body>
 </html>"""
 
+        from weasyprint import HTML
+
         HTML(string=full_html).write_pdf(pdf_path)
         agent_logger.log_tool_result("generate_newspaper_pdf", f"PDF path: {pdf_path}")
         upload = await _upload_file_to_supabase_storage(file_path=pdf_path, content_type="application/pdf")
@@ -1440,6 +1568,7 @@ async def generate_newspaper_pdf(summaries: list[dict] | None = None) -> dict:
             "articles_count": len(summaries),
             "message": "PDF generated successfully.",
             "storage": upload,
+            "backend": backend,
         }
     except Exception as e:
         log.error("PDF generation failed: %s", e)

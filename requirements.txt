@@ -22,6 +22,7 @@ httpx==0.27.0
 weasyprint==62.3
 pydyf==0.10.0
 rich==13.7.1
+reportlab==4.2.5
 
 # Semantic memory
 pinecone>=5.0.0
