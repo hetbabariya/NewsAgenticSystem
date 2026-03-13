@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import uuid
+import asyncio
 
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.runnables.config import RunnableConfig
@@ -31,6 +32,7 @@ log = logging.getLogger("orchestrator.runtime")
 _coordinator = None
 _mcp_client = None
 _mcp_tools: list = []
+_init_lock: asyncio.Lock | None = None
 
 
 async def init_graph() -> None:
@@ -44,6 +46,25 @@ async def init_graph() -> None:
     else:
         log.warning("No MCP tools loaded. Check TAVILY_API_KEYS, GITHUB_TOKEN, TWITTER_API_KEY in .env")
     _coordinator = build_coordinator(mcp_client=_mcp_client, mcp_tools=_mcp_tools)
+
+
+async def ensure_graph_initialized() -> None:
+    """Lazy init for Render/low-memory environments.
+
+    Safe to call concurrently.
+    """
+
+    global _init_lock
+    if _coordinator is not None:
+        return
+
+    if _init_lock is None:
+        _init_lock = asyncio.Lock()
+
+    async with _init_lock:
+        if _coordinator is not None:
+            return
+        await init_graph()
 
 
 async def shutdown_graph() -> None:
@@ -61,6 +82,7 @@ from app.core.logger import agent_logger
 
 async def run_graph(trigger: str, payload: dict | None = None) -> dict:
     trace = str(uuid.uuid4())[:8]
+    await ensure_graph_initialized()
     graph = get_graph()
 
     agent_logger.log_agent_start("COORDINATOR", f"Trigger: {trigger} | Payload: {payload}")

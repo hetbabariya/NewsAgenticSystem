@@ -428,12 +428,8 @@ async def mark_newspaper_sent() -> dict:
 
 # Anti-blocking headers for Reddit
 REDDIT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "NewsAgenticSystem/1.0.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Referer": "https://www.google.com/",
 }
 
 def _extract_reddit_post(post_data: dict) -> dict:
@@ -454,9 +450,21 @@ def _extract_reddit_post(post_data: dict) -> dict:
 @tool
 async def fetch_reddit_posts(subreddit: str = "MachineLearning", limit: int = 10) -> dict:
     """Fetch top posts from a specific subreddit using Reddit's JSON API with retry logic."""
-    subreddit = _truncate(subreddit.strip(), 80) or "MachineLearning"
+    # Clean subreddit name: remove /r/ prefix if present, strip whitespace
+    sub = subreddit.strip()
+    if sub.lower().startswith("/r/"):
+        sub = sub[3:]
+    elif sub.lower().startswith("r/"):
+        sub = sub[2:]
+
+    sub = _truncate(sub, 80) or "MachineLearning"
+
+    # Special case for 'AI' which sometimes needs to be 'ai' or 'ArtificialIntelligence'
+    if sub.upper() == "AI":
+        sub = "ArtificialIntelligence" # /r/AI often redirects or 404s depending on user-agent
+
     safe_limit = _clamp_int(limit, 1, max(1, settings.reddit_max_posts))
-    url = f"https://www.reddit.com/r/{subreddit}/top.json?limit={safe_limit}&t=day"
+    url = f"https://www.reddit.com/r/{sub}/top.json?limit={safe_limit}&t=day"
     max_retries = _clamp_int(settings.reddit_max_retries, 1, 10)
     base_delay = float(settings.reddit_retry_base_delay_seconds)
 
