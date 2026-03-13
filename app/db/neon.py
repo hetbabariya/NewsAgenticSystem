@@ -14,6 +14,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import asyncpg
 
 from app.core.settings import settings
+from app.semantic_memory import init_semantic_memory, semantic_upsert
 
 log = logging.getLogger("db")
 
@@ -93,7 +94,7 @@ async def get_preferences() -> dict:
     """Load user preferences from Pinecone (semantic memory). Returns {} if not set."""
     # We use a deterministic ID for preferences in Pinecone
     pref_id = "user-preferences"
-    index, _ = _init_semantic_memory()
+    index, _ = init_semantic_memory()
     if index is None:
         return {}
 
@@ -128,7 +129,7 @@ async def save_preferences(new_prefs: dict) -> bool:
     )
 
     try:
-        await _semantic_upsert(
+        await semantic_upsert(
             item_id=pref_id,
             text=prefs_text,
             metadata={
