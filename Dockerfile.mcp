@@ -1,20 +1,16 @@
 FROM supercorp/supergateway:latest
 
-# Install Node.js and npm
-RUN apt-get update \
-    && apt-get install -y nodejs npm \
-    && npm install -g tavily-mcp \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+# install node and npm (Alpine package manager)
+RUN apk add --no-cache nodejs npm \
+    && npm install -g tavily-mcp
 
-# MCP configuration
+# MCP config
 ENV MCP_OUTPUT_TRANSPORT=sse
 ENV MCP_SSE_PATH=/sse
 ENV MCP_MESSAGE_PATH=/message
 ENV MCP_HTTP_PATH=/mcp
 
-# Default MCP command (can be overridden in Render env vars)
+# default command
 ENV MCP_STDIO_CMD="tavily-mcp"
 
-# Start supergateway
 ENTRYPOINT ["sh", "-c", "echo \"Starting supergateway with command: $MCP_STDIO_CMD on port ${PORT:-8000}\"; exec supergateway --stdio \"$MCP_STDIO_CMD\" --port \"${PORT:-8000}\" --outputTransport \"${MCP_OUTPUT_TRANSPORT:-sse}\" --ssePath \"${MCP_SSE_PATH:-/sse}\" --messagePath \"${MCP_MESSAGE_PATH:-/message}\" --streamableHttpPath \"${MCP_HTTP_PATH:-/mcp}\" --cors --healthEndpoint /healthz --baseUrl \"https://${RENDER_EXTERNAL_HOSTNAME:-localhost}\""]
