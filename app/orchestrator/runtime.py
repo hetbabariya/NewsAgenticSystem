@@ -69,6 +69,38 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
 
     # Deterministic cron routing: do not rely on coordinator prompt.
     if trigger in {"ingest_cron", "daily_cron"}:
+        async def _resolve_telegram_dest_chat_id() -> str | None:
+            if settings.telegram_admin_chat_id:
+                return settings.telegram_admin_chat_id
+            try:
+                from app.db.neon import fetch_one
+
+                row = await fetch_one(
+                    """
+                    SELECT metadata
+                    FROM episodic_memory
+                    WHERE event_type = 'telegram_chat_id'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                )
+                if not row:
+                    return None
+                meta = row.get("metadata")
+                if isinstance(meta, dict):
+                    chat_id = meta.get("chat_id")
+                    return str(chat_id) if chat_id else None
+                if isinstance(meta, str) and meta.strip():
+                    try:
+                        parsed = json.loads(meta)
+                        if isinstance(parsed, dict) and parsed.get("chat_id"):
+                            return str(parsed.get("chat_id"))
+                    except Exception:
+                        return None
+            except Exception:
+                return None
+            return None
+
         shared_tools = build_shared_tools(mcp_tools=_mcp_tools)
         registry = build_registry()
 
@@ -232,7 +264,8 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
 
             # Immediate urgent alerts (Telegram admin) — deterministic, no LLM.
             # We only alert on summaries that have not been sent_immediate yet to prevent repeat pings.
-            if settings.telegram_admin_chat_id:
+            dest_chat_id = await _resolve_telegram_dest_chat_id()
+            if dest_chat_id:
                 try:
                     from app.db.neon import fetch_all
 
@@ -266,7 +299,9 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
                             if row.get("summary_id") is not None:
                                 summary_ids.append(str(row.get("summary_id")))
 
-                        await send_message(settings.telegram_admin_chat_id, "\n".join(lines), parse_mode=None)
+                        ok = await send_message(dest_chat_id, "\n".join(lines), parse_mode=None)
+                        if not ok:
+                            log.warning("Urgent Telegram alert send_message returned False")
 
                         if summary_ids:
                             try:
@@ -290,7 +325,8 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
             pdf_res = await generate_newspaper_pdf.ainvoke({"summaries": summaries})
 
             # Send the PDF to Telegram admin (if configured)
-            if summaries and settings.telegram_admin_chat_id:
+            dest_chat_id = await _resolve_telegram_dest_chat_id()
+            if summaries and dest_chat_id:
                 try:
                     storage = (pdf_res or {}).get("storage") or {}
                     url = storage.get("public_url") or storage.get("signed_url")
@@ -300,14 +336,21 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
 
                     pdf_path = (pdf_res or {}).get("pdf_path")
                     if isinstance(pdf_path, str) and pdf_path.lower().endswith(".pdf") and os.path.exists(pdf_path):
-                        await send_document(
-                            settings.telegram_admin_chat_id,
+                        ok = await send_document(
+                            dest_chat_id,
                             pdf_path,
                             filename=os.path.basename(pdf_path),
                             caption=caption,
                         )
+                        if not ok:
+                            log.warning("send_document returned False; falling back to send_message")
+                            ok2 = await send_message(dest_chat_id, caption, parse_mode=None)
+                            if not ok2:
+                                log.warning("send_message fallback for newspaper also returned False")
                     else:
-                        await send_message(settings.telegram_admin_chat_id, caption)
+                        ok = await send_message(dest_chat_id, caption, parse_mode=None)
+                        if not ok:
+                            log.warning("send_message for newspaper returned False")
                 except Exception as exc:
                     log.warning("Failed to send newspaper to Telegram: %s", exc)
 
@@ -422,6 +465,16 @@ async def run_graph(trigger: str, payload: dict | None = None) -> dict:
 async def handle_telegram_message(text: str, chat_id: str) -> None:
     trace = str(uuid.uuid4())[:8]
     log.info("[%s] Telegram: %s", trace, text[:80])
+
+    # Persist last-seen chat id for cron notifications (newspaper / urgent alerts)
+    try:
+        await write_episodic(
+            "telegram_chat_id",
+            "Last seen Telegram chat id",
+            {"chat_id": str(chat_id)},
+        )
+    except Exception:
+        pass
 
     try:
         result = await run_graph("telegram", {"text": text, "chat_id": chat_id})
