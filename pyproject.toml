@@ -25,6 +25,6 @@ dependencies = [
     "pydyf==0.10.0",
     "rich>=13.7.1",
     "pinecone-client>=2.2.4",
-    "langchain-huggingface==0.1.2",
-    "huggingface_hub==0.24.6",
+    "langchain-huggingface>=0.3.0",
+    "huggingface_hub>=0.24.6",
 ]
