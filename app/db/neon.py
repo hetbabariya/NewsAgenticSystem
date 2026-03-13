@@ -90,26 +90,57 @@ async def fetch_val(query: str, *args: Any) -> Any:
 
 
 async def get_preferences() -> dict:
-    """Load the single preferences row. Returns {} if not yet set."""
-    row = await fetch_one("SELECT prefs_json FROM preferences ORDER BY id DESC LIMIT 1")
-    if not row:
+    """Load user preferences from Pinecone (semantic memory). Returns {} if not set."""
+    # We use a deterministic ID for preferences in Pinecone
+    pref_id = "user-preferences"
+    index, _ = _init_semantic_memory()
+    if index is None:
         return {}
-    prefs = row["prefs_json"]
-    if not prefs:
-        return {}
-    if isinstance(prefs, dict):
-        return prefs
-    if isinstance(prefs, str):
+
+    def _do_fetch() -> dict:
         try:
-            parsed = json.loads(prefs)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
+            res = index.fetch(ids=[pref_id])
+            if res and "vectors" in res and pref_id in res["vectors"]:
+                vec_data = res["vectors"][pref_id]
+                metadata = vec_data.get("metadata", {})
+                # Preferences are stored as JSON strings in the 'prefs_json' metadata field
+                prefs_raw = metadata.get("prefs_json")
+                if prefs_raw:
+                    if isinstance(prefs_raw, str):
+                        return json.loads(prefs_raw)
+                    return dict(prefs_raw)
             return {}
-    # asyncpg may return JSON/JSONB as a Mapping-like object
+        except Exception as exc:
+            log.warning("Pinecone preference fetch failed: %s", exc)
+            return {}
+
+    return await asyncio.to_thread(_do_fetch)
+
+
+async def save_preferences(new_prefs: dict) -> bool:
+    """Save user preferences directly to Pinecone."""
+    pref_id = "user-preferences"
+    prefs_text = (
+        "User preference profile. "
+        f"Topics: {', '.join(new_prefs.get('topics', []))}. "
+        f"Keywords: {', '.join(new_prefs.get('keywords', []))}. "
+        f"Excluded: {', '.join(new_prefs.get('excluded_topics', []))}."
+    )
+
     try:
-        return dict(prefs)
-    except Exception:
-        return {}
+        await _semantic_upsert(
+            item_id=pref_id,
+            text=prefs_text,
+            metadata={
+                "type": "preference",
+                "importance": 5,
+                "prefs_json": json.dumps(new_prefs)
+            },
+        )
+        return True
+    except Exception as exc:
+        log.error("Failed to save preferences to Pinecone: %s", exc)
+        return False
 
 
 async def ensure_key_usage_row(provider: str, key_index: int) -> None:

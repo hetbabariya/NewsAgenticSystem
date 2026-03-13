@@ -8,5 +8,20 @@ __pycache__/
 venv/
 .git/
 .gitignore
+ .ruff_cache/
+ .mypy_cache/
+ .pytest_cache/
+ htmlcov/
+ coverage.xml
+ .coverage
+ dist/
+ build/
+ *.log
+ *.sqlite3
+ *.db
+ *.pdf
+ node_modules/
+ .DS_Store
+ Thumbs.db
 Reference/
 alembic/versions/__pycache__/

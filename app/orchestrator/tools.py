@@ -947,28 +947,12 @@ async def update_user_preferences(change_description: str) -> dict:
             "excluded_topics": list(set(update.excluded_topics)),
         }
 
-        await execute("INSERT INTO preferences (prefs_json) VALUES ($1)", json.dumps(new_prefs))
+        # Save directly to Pinecone (semantic memory)
+        from app.db.neon import save_preferences
+        success = await save_preferences(new_prefs)
 
-        # Also store a semantic preference snapshot so future runs can reason over it.
-        try:
-            prefs_text = (
-                "User preference profile. "
-                f"Topics: {', '.join(new_prefs['topics'])}. "
-                f"Keywords: {', '.join(new_prefs['keywords'])}. "
-                f"Excluded: {', '.join(new_prefs['excluded_topics'])}."
-            )
-            # Use a deterministic id so future updates overwrite rather than explode memory.
-            pref_id = "user-preferences"
-            await _semantic_upsert(
-                item_id=pref_id,
-                text=prefs_text,
-                metadata={
-                    "type": "preference",
-                    "importance": 5,
-                },
-            )
-        except Exception as sem_exc:
-            log.warning("Failed to upsert preferences into semantic memory: %s", sem_exc)
+        if not success:
+            return {"error": "Failed to save preferences to semantic memory", "updated": False}
 
         return {"updated": True, "message": update.summary}
     except Exception as e:
