@@ -5,6 +5,7 @@ All agents call these helpers. Never write raw asyncpg elsewhere.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging

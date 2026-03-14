@@ -7,60 +7,58 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
-# Keep builder lightweight; compiled wheels are not required for this project.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy only dependency manifests first so this layer is cached unless deps change
+# Install deps first (cached unless pyproject.toml/uv.lock change)
 COPY pyproject.toml uv.lock ./
 
-# Install dependencies using uv
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project
+    uv sync --frozen --no-install-project --no-dev
 
-# Final stage
-FROM python:3.12-slim-bookworm
+# Copy source after deps (maximizes layer cache hits)
+COPY . .
 
-WORKDIR /app
+# Install project itself (separate layer)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
-# Render 512Mi optimization: install only minimal runtime system deps.
-# Optional: enable Node.js for MCP (npx) and/or WeasyPrint native deps via build args.
+# ─── Runtime ────────────────────────────────────────────────────────────────
+FROM python:3.12-slim-bookworm AS runtime
+
 ARG INSTALL_NODE=0
 ARG INSTALL_WEASYPRINT_DEPS=0
 
+WORKDIR /app
+
 RUN set -eux; \
-    apt-get update; \
+    apt-get update -qq; \
     apt-get install -y --no-install-recommends ca-certificates; \
     if [ "$INSTALL_NODE" = "1" ]; then \
       apt-get install -y --no-install-recommends curl; \
       curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
       apt-get install -y --no-install-recommends nodejs; \
+      apt-get purge -y --auto-remove curl; \
     fi; \
     if [ "$INSTALL_WEASYPRINT_DEPS" = "1" ]; then \
       apt-get install -y --no-install-recommends \
-        python3-cffi \
-        python3-brotli \
-        libcairo2 \
-        libgdk-pixbuf-2.0-0 \
-        shared-mime-info \
-        fontconfig \
-        fonts-dejavu-core \
-        libpango-1.0-0 \
-        libharfbuzz0b \
-        libpangoft2-1.0-0 \
-        libpangocairo-1.0-0; \
+        python3-cffi python3-brotli libcairo2 libgdk-pixbuf-2.0-0 \
+        shared-mime-info fontconfig fonts-dejavu-core \
+        libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0 libpangocairo-1.0-0; \
     fi; \
     rm -rf /var/lib/apt/lists/*
 
-# Copy virtualenv from builder
-COPY --from=builder /app/.venv /app/.venv
-ENV PATH="/app/.venv/bin:$PATH"
+# Non-root user for security + smaller attack surface
+RUN groupadd --gid 1001 appuser && \
+    useradd --uid 1001 --gid appuser --no-create-home appuser
 
-COPY . .
+COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
+COPY --chown=appuser:appuser . .
 
-ENV HOST=0.0.0.0
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONFAULTHANDLER=1
+
+USER appuser
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${WORKERS:-1}"]
